@@ -160,3 +160,38 @@ def bucket_history_counters(
 
     return bucket_ids
 
+
+def generate_availability_schedule(
+    dataset_name: str,
+    len_a: int,
+    len_b: int,
+    markov_params: TwoStateMarkovParams,
+    seed: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Generate availability schedule for a single sample.
+
+    Args:
+        dataset_name: name of the dataset, e.g. "meld".
+        len_a: per-sample sequence length for modality A (audio).
+        len_b: per-sample sequence length for modality B (text).
+        markov_params: parameters of the 2-state Markov chain.
+        seed: optional RNG seed for reproducibility (e.g. hash of client_id + sample idx).
+
+    Returns:
+        a_mask, b_mask: bool arrays (T_a,) and (T_b,) where True means ON.
+        events_a, events_b: bool arrays indicating OFF→ON reintegration events.
+        r_a, r_b: int arrays, availability history counters.
+    """
+    if dataset_name == "meld":
+        rng_a = np.random.default_rng(seed) if seed is not None else None
+        rng_b = np.random.default_rng(seed + 1) if seed is not None else None
+        a_mask = sample_two_state_markov(len_a, markov_params, rng=rng_a)
+        b_mask = sample_two_state_markov(len_b, markov_params, rng=rng_b)
+        events_a = reintegration_events(a_mask)
+        events_b = reintegration_events(b_mask)
+        r_a = availability_history_counter(a_mask) #do we want history precomuted? I have no idea - we will have to see
+        r_b = availability_history_counter(b_mask)
+        return a_mask, b_mask, events_a, events_b, r_a, r_b
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")

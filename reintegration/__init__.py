@@ -5,7 +5,8 @@ Reintegration-focused utilities:
 - availability-history counters and transforms,
 - evaluation helpers for reintegration-window metrics.
 
-These modules are designed to be wired into `fed_multimodal` training and
-evaluation code from extension scripts, keeping upstream code largely intact.
+Temporal mask storage (sidecar): run generate_meld_availability to precompute
+per-sample masks/events; see generate_meld_availability.py docstring for
+sidecar path and structure.
 """
 
