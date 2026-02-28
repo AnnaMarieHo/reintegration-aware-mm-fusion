@@ -21,13 +21,15 @@ Sidecar structure:
     ...
   }
 
-Usage:
-  python -m my_extensions.reintegration.generate_meld_availability \\
-    --data_dir /path/to/output \\
-    --output_dir /path/to/output \\
-    --availability_process markov \\
-    --availability_seed 42 \\
-    --p_off_on 0.05 --p_on_off 0.05
+Usage for Linux/WSL:
+    For now this is the relative path to the current directory (masters-proj)
+    python -m my_extensions.reintegration.generate_meld_availability \
+        --data_dir fed-multimodal/fed_multimodal/output/ \
+        --output_dir fed-multimodal/fed_multimodal/output/ \
+        --availability_process markov \
+        --availability_seed 42 \
+        --p_off_on 0.05 \
+        --p_on_off 0.05
 """
 
 from __future__ import annotations
@@ -121,26 +123,35 @@ def generate_meld_availability(
     args = _make_args(data_dir=data_dir, dataset=dataset)
     dm = DataloadManager(args)
     dm.get_text_feat_path()
+    print(f"Text feat path: {dm.text_feat_path}")
     dm.get_audio_feat_path()
+    print(f"Audio feat path: {dm.audio_feat_path}")
     dm.get_client_ids()
-
+    print(f"Client ids: {dm.client_ids}")
     markov_params = TwoStateMarkovParams(p_off_on=p_off_on, p_on_off=p_on_off)
+    print(f"Markov params: {markov_params}")
     sidecar = {}
 
     for client_id in dm.client_ids:
         audio_dict = dm.load_audio_feat(client_id=client_id)
         text_dict = dm.load_text_feat(client_id=client_id)
+        print(f"Audio dict: {len(audio_dict)}")
+        print(f"Text dict: {len(text_dict)}")
         # Both dicts are keyed by the same integer indices.
-        indices = sorted(k for k in audio_dict if k in text_dict)
+        indices = sorted([id for id in client_id if id.isdigit()], key=int)
+        print(f"Indices: {indices}")
+        print(f"Indices length: {len(indices)}")
         sidecar[client_id] = {}
 
         for idx in indices:
             # data_dict[idx] = [..., label, feature_array]; feature at -1
+            idx = int(idx)
             fe_a = audio_dict[idx][-1]
             fe_b = text_dict[idx][-1]
             T_a = _sequence_length(fe_a)
             T_b = _sequence_length(fe_b)
-
+            print(f"T_a: {T_a}")
+            print(f"T_b: {T_b}")
             # Deterministic seed per (client, sample)
             try:
                 seed = hash((client_id, idx)) % (2**32)
