@@ -81,6 +81,7 @@ def run_meld_with_markov_availability(
         d_hid=args.hid_size,
         en_att=args.att,
         att_name=args.att_name,
+        return_aux=True,
     )
 
     device = "cuda" if hasattr(args, "device") and args.device == "cuda" else "cpu"
