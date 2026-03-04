@@ -27,14 +27,14 @@ from tqdm import tqdm
 from pathlib import Path
 
 
-from fed_multimodal.constants import constants
-from fed_multimodal.trainers.server_trainer import Server
-from fed_multimodal.model.mm_models import SERClassifier
-from fed_multimodal.dataloader.dataload_manager import DataloadManager
+from my_extensions.reintegration.constants import constants
+from my_extensions.reintegration.server_trainer import Server
+from my_extensions.reintegration.mm_models import SERClassifier
+from my_extensions.reintegration.dataload_manager import DataloadManager
 
-from fed_multimodal.trainers.fed_rs_trainer import ClientFedRS
-from fed_multimodal.trainers.fed_avg_trainer import ClientFedAvg
-from fed_multimodal.trainers.scaffold_trainer import ClientScaffold
+# from my_extensions.reintegration.trainers.fed_rs_trainer import ClientFedRS
+from my_extensions.reintegration.trainers.fed_avg_trainer import ClientFedAvg
+# from my_extensions.reintegration.trainers.scaffold_trainer import ClientScaffold
 
 import sys
 from pathlib import Path
@@ -306,10 +306,10 @@ if __name__ == '__main__':
 
     if args.fed_alg in ['fed_avg', 'fed_prox', 'fed_opt']:
         Client = ClientFedAvg
-    elif args.fed_alg in ['scaffold']:
-        Client = ClientScaffold
-    elif args.fed_alg in ['fed_rs']:
-        Client = ClientFedRS
+    # elif args.fed_alg in ['scaffold']:
+    #     Client = ClientScaffold
+    # elif args.fed_alg in ['fed_rs']:
+        # Client = ClientFedRS
 
     # load simulation feature
     dm.load_sim_dict()
