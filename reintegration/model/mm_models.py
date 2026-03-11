@@ -432,8 +432,12 @@ class Conv1dEncoder(nn.Module):
         x = x.float()
         x = x.permute(0, 2, 1)
         x = self.dropout(self.pooling(self.relu(self.conv1(x))))
+        # print('conv1', x, x.shape)
+        # pdb.set_trace()
         x = self.dropout(self.pooling(self.relu(self.conv2(x))))
+        # print('conv2', x, x.shape)
         x = self.dropout(self.pooling(self.relu(self.conv3(x))))
+        # print('conv3', x, x.shape)
         x = x.permute(0, 2, 1)
         return x
 

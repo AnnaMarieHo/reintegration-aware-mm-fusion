@@ -19,7 +19,7 @@ num_class_dict = {
     'mit101':               101, 
     'mit10':                10, 
     'mit51':                51, 
-    'meld':                 4,
+    'meld':                 7,
     'crema_d':              4,
     'uci-har':              6,
     'ptb-xl':               5,
