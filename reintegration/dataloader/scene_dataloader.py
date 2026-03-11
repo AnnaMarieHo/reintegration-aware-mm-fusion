@@ -129,11 +129,26 @@ class SceneDataset(Dataset):
             if feat_a is not None:
                 if feat_a.ndim == 3:
                     feat_a = feat_a[0]
+                # Treat utterances too short to survive conv stack as missing
+                if feat_a.shape[0] < 8:
+                    feat_a = None
+
+            if feat_a is not None:
                 x_a = torch.tensor(feat_a, dtype=torch.float32)
                 l_a = x_a.shape[0]
             else:
                 x_a = torch.zeros(self.default_shape_a, dtype=torch.float32)
                 l_a = 0
+
+            # feat_a = self.audio_feat_dict.get(filename, None)
+            # if feat_a is not None:
+            #     if feat_a.ndim == 3:
+            #         feat_a = feat_a[0]
+            #     x_a = torch.tensor(feat_a, dtype=torch.float32)
+            #     l_a = x_a.shape[0]
+            # else:
+            #     x_a = torch.zeros(self.default_shape_a, dtype=torch.float32)
+            #     l_a = 0
 
             # Text
             feat_b = self.text_feat_dict.get(filename, None)

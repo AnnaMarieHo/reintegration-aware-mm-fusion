@@ -103,9 +103,12 @@ class ClientFedAvg(object):
                     (scene_x_a, scene_x_b,
                      scene_len_a, scene_len_b,
                      scene_labels, scene_mask) = batch_data
+                    # pdb.set_trace()
 
                     scene_labels = scene_labels.to(self.device)   # (T,)
+                    # print(scene_labels.shape)
                     scene_mask   = scene_mask.to(self.device)     # (T,)
+                    # print(scene_mask.shape)
 
                     # ── Two-pass forward ──────────────────────────────────
                     # Pass 1: stable (audio always present)
@@ -126,12 +129,15 @@ class ClientFedAvg(object):
                     log_stable = torch.log_softmax(preds_stable, dim=-1)  # (T, C)
                     log_masked = torch.log_softmax(preds_masked, dim=-1)  # (T, C)
 
+                    assert scene_labels.min() >= 0 and scene_labels.max() < preds_stable.shape[-1], f"Label out of range: min={scene_labels.min()}, max={scene_labels.max()}, n_classes={preds_stable.shape[-1]}"
                     loss_stable = self.criterion(log_stable, scene_labels)
+
                     loss_masked = self.criterion(log_masked, scene_labels)
 
                     # Equal weighting of both conditions.
                     # The stable pass teaches full fusion;
                     # the masked pass teaches absence robustness and reintegration.
+                    # print(loss_stable, loss_masked)
                     loss = loss_stable + loss_masked
 
                 else:

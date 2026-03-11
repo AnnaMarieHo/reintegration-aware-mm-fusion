@@ -2,20 +2,20 @@
 Train temporal missingness model for the MELD dataset.
 Usage:
 
-python -m my_extensions.reintegration.train
-    --dataset meld
-    --modality multimodal     
+python -m my_extensions.reintegration.train \
+    --dataset meld \
+    --modality multimodal \
     --audio_feat mfcc     
-    --text_feat mobilebert     
-    --fed_alg fed_avg     
-    --num_epochs 200     
-    --local_epochs 1     
-    --sample_rate 1.0     
-    --batch_size 16     
-    --hid_size 128     
-    --learning_rate 0.01     
-    --en_att     
-    --att_name fuse_base     
+    --text_feat mobilebert \
+    --fed_alg fed_avg \
+    --num_epochs 200 \
+    --local_epochs 1 \
+    --sample_rate 1.0 \
+    --batch_size 16 \
+    --hid_size 128 \
+    --learning_rate 0.01 \
+    --en_att \
+    --att_name fuse_base \
     --availability_process markov
 """
 import torch
@@ -26,6 +26,8 @@ import torch.nn as nn
 import argparse, logging
 import torch.multiprocessing
 import copy, time, shutil, sys, os, pdb
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
 
 from tqdm import tqdm
 from pathlib import Path

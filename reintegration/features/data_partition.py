@@ -14,10 +14,13 @@ from .partition_manager import PartitionManager
 
 # Label dictionary
 LABEL_DICT = {
-    'neutral': 0,
-    'sadness': 1,
-    'joy':     2,
-    'anger':   3,
+    'neutral':  0,
+    'sadness':  1,
+    'joy':      2,
+    'anger':    3,
+    'disgust':  4,
+    'fear':     5,
+    'surprise': 6,
 }
 
 # Utterance entries that look like generic/non-character speakers
