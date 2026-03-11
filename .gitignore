@@ -1,1 +1,5 @@
-output/
+MELD.Raw/
+.venv/
+venv/
+reintegration/output/feature/
+__pycache__/
