@@ -75,11 +75,15 @@ class PartitionManager():
             self.label_dict = {k: i for i, k in enumerate(unique_labels)}
         elif self.args.dataset == "meld":
             self.label_dict = {
-                'neutral': 0, 
-                'sadness': 1, 
-                'joy': 2, 
-                'anger': 3
+                'neutral':  0,
+                'sadness':  1,
+                'joy':      2,
+                'anger':    3,
+                'disgust':  4,
+                'fear':     5,
+                'surprise': 6,
             }
+
         elif self.args.dataset == 'ku-har':
             self.label_dict  = {
                 '0.Stand': 0, 

@@ -7,535 +7,417 @@ from pathlib import Path
 from copy import deepcopy
 from torch.utils.tensorboard import SummaryWriter
 
-from .evaluation import EvalMetric
+from my_extensions.reintegration.evaluation import EvalMetric
 
-# logging format
 import logging
 logging.basicConfig(
-    format='%(asctime)s %(levelname)-3s ==> %(message)s', 
-    level=logging.INFO, 
+    format='%(asctime)s %(levelname)-3s ==> %(message)s',
+    level=logging.INFO,
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
 
 class Server(object):
-    def __init__(
-        self, 
-        args, 
-        model, 
-        device,
-        criterion,
-        client_ids
-    ):
-        self.args = args
-        self.device = device
+    def __init__(self, args, model, device, criterion, client_ids):
+        self.args        = args
+        self.device      = device
         self.result_dict = dict()
         self.global_model = model
-        self.criterion = criterion
-        self.client_ids = client_ids
-        self.multilabel = True if args.dataset == 'ptb-xl' else False
+        self.criterion   = criterion
+        self.client_ids  = client_ids
+        self.multilabel  = True if args.dataset == 'ptb-xl' else False
         self.model_setting_str = self.get_model_setting()
-        
+
         if self.args.fed_alg == 'scaffold':
-            self.server_control = self.init_control(model)
+            self.server_control  = self.init_control(model)
             self.set_control_device(self.server_control, True)
             self.client_controls = {
                 client_id: self.init_control(model) for client_id in self.client_ids
             }
         elif self.args.fed_alg == 'fed_opt':
             self.global_optimizer = self._initialize_global_optimizer()
-            
+
     def _initialize_global_optimizer(self):
-        # global optimizer
-        global_optimizer = torch.optim.SGD(
+        return torch.optim.SGD(
             self.global_model.parameters(),
             lr=self.args.global_learning_rate,
-            momentum=0.9,
-            weight_decay=0.0
+            momentum=0.9, weight_decay=0.0
         )
-        return global_optimizer
 
-    def set_client_control(
-        self,
-        client_id,
-        client_control
-    ):
+    def set_client_control(self, client_id, client_control):
         self.client_controls[client_id] = client_control
-        
-    def initialize_log(
-        self, 
-        fold_idx: int=1
-    ):
-        # log saving path
-        self.fold_idx = fold_idx
-        self.log_path = Path(self.args.data_dir).joinpath(
-            'log', 
-            self.args.fed_alg,
-            self.args.dataset, 
-            self.feature,
-            self.att,
-            self.model_setting_str, 
-            f'fold{fold_idx}', 
-            'raw_log'
+
+    def initialize_log(self, fold_idx: int=1):
+        self.fold_idx   = fold_idx
+        self.log_path   = Path(self.args.data_dir).joinpath(
+            'log', self.args.fed_alg, self.args.dataset,
+            self.feature, self.att, self.model_setting_str,
+            f'fold{fold_idx}', 'raw_log'
         )
         self.result_path = Path(self.args.data_dir).joinpath(
-            'log', 
-            self.args.fed_alg,
-            self.args.dataset, 
-            self.feature,
-            self.att,
-            self.model_setting_str, 
+            'log', self.args.fed_alg, self.args.dataset,
+            self.feature, self.att, self.model_setting_str,
             f'fold{fold_idx}'
         )
         Path.mkdir(self.log_path, parents=True, exist_ok=True)
         self.log_writer = SummaryWriter(
-            str(self.log_path), 
+            str(self.log_path),
             filename_suffix=f'_{self.model_setting_str}'
         )
-        
         self.best_test_dict = list()
-        
+
     def get_model_setting(self):
-        # Return model setting
         model_setting_str = ""
-        # Audio text pairs
-        elif self.args.dataset in ['meld']:
+        if self.args.dataset in ['meld']:
             if self.args.modality == "multimodal":
                 self.feature = f'{self.args.audio_feat}_{self.args.text_feat}'
             elif self.args.modality == "audio":
                 self.feature = f'{self.args.audio_feat}'
             elif self.args.modality == "text":
                 self.feature = f'{self.args.text_feat}'
-        
-        if len(model_setting_str) == 0:
-            model_setting_str = 'hid'+str(self.args.hid_size)
-        else:
-            model_setting_str += '_hid'+str(self.args.hid_size)
-        model_setting_str += '_le'+str(self.args.local_epochs)
-        model_setting_str += '_lr' + str(self.args.learning_rate).replace('.', '')
-        if self.args.fed_alg == 'fed_opt': model_setting_str += '_gl'+str(self.args.global_learning_rate).replace('.', '')
-        model_setting_str += '_bs'+str(self.args.batch_size)
-        model_setting_str += '_sr'+str(self.args.sample_rate).replace('.', '')
-        model_setting_str += '_ep'+str(self.args.num_epochs)
-        if self.args.fed_alg == 'fed_prox': model_setting_str += '_mu'+str(self.args.mu).replace('.', '')
-        
-        # attention str
-        if self.args.att: self.att = f'{self.args.att_name}'
-        else: self.att = 'no_att'
 
-        # FL simulations: missing modality, label noise, missing labels
-        if self.args.missing_modality == True:
-            model_setting_str += '_mm'+str(self.args.missing_modailty_rate).replace('.', '')
-        if self.args.label_nosiy == True:
-            model_setting_str += '_ln'+str(self.args.label_nosiy_level).replace('.', '')
-        if self.args.missing_label == True:
-            model_setting_str += '_ml'+str(self.args.missing_label_rate).replace('.', '')
+        if len(model_setting_str) == 0:
+            model_setting_str = 'hid' + str(self.args.hid_size)
+        else:
+            model_setting_str += '_hid' + str(self.args.hid_size)
+        model_setting_str += '_le'  + str(self.args.local_epochs)
+        model_setting_str += '_lr'  + str(self.args.learning_rate).replace('.', '')
+        if self.args.fed_alg == 'fed_opt':
+            model_setting_str += '_gl' + str(self.args.global_learning_rate).replace('.', '')
+        model_setting_str += '_bs' + str(self.args.batch_size)
+        model_setting_str += '_sr' + str(self.args.sample_rate).replace('.', '')
+        model_setting_str += '_ep' + str(self.args.num_epochs)
+        if self.args.fed_alg == 'fed_prox':
+            model_setting_str += '_mu' + str(self.args.mu).replace('.', '')
+
+        self.att = f'{self.args.att_name}' if self.args.att else 'no_att'
+
+        if self.args.missing_modality:
+            model_setting_str += '_mm' + str(self.args.missing_modailty_rate).replace('.', '')
+        if self.args.label_nosiy:
+            model_setting_str += '_ln' + str(self.args.label_nosiy_level).replace('.', '')
+        if self.args.missing_label:
+            model_setting_str += '_ml' + str(self.args.missing_label_rate).replace('.', '')
         return model_setting_str
-    
+
     def sample_clients(self, num_of_clients, sample_rate=0.1):
-        # Sample clients per round
         self.clients_list = list()
         for epoch in range(int(self.args.num_epochs)):
             np.random.seed(epoch)
             idxs_clients = np.random.choice(
-                range(num_of_clients), 
-                int(sample_rate * num_of_clients), 
+                range(num_of_clients),
+                int(sample_rate * num_of_clients),
                 replace=False
             )
             self.clients_list.append(idxs_clients)
         self.num_of_clients = num_of_clients
 
     def initialize_epoch_updates(self, epoch):
-        # Initialize updates
         self.epoch = epoch
-        self.model_updates = list()
+        self.model_updates    = list()
         self.num_samples_list = list()
-        self.delta_controls = list()
+        self.delta_controls   = list()
         self.result_dict[self.epoch] = dict()
         self.result_dict[self.epoch]['train'] = list()
-        self.result_dict[self.epoch]['dev'] = list()
-        self.result_dict[self.epoch]['test'] = list()
-        
+        self.result_dict[self.epoch]['dev']   = list()
+        self.result_dict[self.epoch]['test']  = list()
+
     def get_parameters(self):
-        # Return model parameters
         return self.global_model.state_dict()
-    
+
     def get_model_result(self):
-        # Return model results
         return self.result
-    
-    def get_test_true(self):
-        # Return test labels
-        return self.test_true
-    
-    def get_test_pred(self):
-        # Return test predictions
-        return self.test_pred
-    
-    def get_train_groundtruth(self):
-        # Return groundtruth used for training
-        return self.train_groundtruth
-    
-    def update(self, learning_rate, label_list, fed_setting):
-        if fed_setting == 'fed_avg': self.update_weights(learning_rate, label_list)
-        else: self.update_gradients(learning_rate, label_list)
+
+    def inference(self, dataloader, condition: str = 'masked'):
+        """
+        Scene-level inference for dev/test evaluation.
+
+        Args:
+            dataloader: scene-level dataloader yielding
+                        (scene_x_a, scene_x_b, scene_len_a, scene_len_b,
+                         scene_labels, scene_mask)
+            condition:  'stable'  — evaluate with all-ones audio mask
+                        'masked'  — evaluate with Markov audio mask from dataloader
+                        'both'    — evaluate both and store per-timestep delta
+                                    (used for reintegration analysis)
+
+        For standard FL evaluation (dev/test UAR), condition='masked' matches
+        the harder trained condition and gives a conservative performance estimate.
+        For reintegration analysis, condition='both' is used separately via
+        run_reintegration_eval().
+        """
+        self.global_model.eval()
+        self.eval = EvalMetric(self.multilabel)
+
+        for batch_idx, batch_data in enumerate(dataloader):
+            if self.args.modality == "multimodal":
+                (scene_x_a, scene_x_b,
+                 scene_len_a, scene_len_b,
+                 scene_labels, scene_mask) = batch_data
+
+                scene_labels = scene_labels.to(self.device)
+                scene_mask   = scene_mask.to(self.device)
+
+                T = scene_labels.shape[0]
+
+                if condition == 'stable':
+                    eval_mask = torch.ones(T, device=self.device, dtype=torch.long)
+                else:
+                    eval_mask = scene_mask   # Markov mask from dataloader
+
+                preds, _ = self.global_model(
+                    scene_x_a, scene_x_b,
+                    scene_len_a, scene_len_b,
+                    eval_mask,
+                    self.device
+                )
+                # preds: (T, num_classes)
+                log_preds = torch.log_softmax(preds, dim=-1)
+                loss = self.criterion(log_preds, scene_labels)
+
+                if not self.multilabel:
+                    self.eval.append_classification_results(
+                        scene_labels, log_preds, loss
+                    )
+                else:
+                    self.eval.append_multilabel_results(
+                        scene_labels, log_preds, loss
+                    )
+            else:
+                x, l, y = batch_data
+                x, l, y = x.to(self.device), l.to(self.device), y.to(self.device)
+                outputs, _ = self.global_model(x.float(), l)
+                if not self.multilabel:
+                    outputs = torch.log_softmax(outputs, dim=1)
+                loss = self.criterion(outputs, y)
+                if not self.multilabel:
+                    self.eval.append_classification_results(y, outputs, loss)
+                else:
+                    self.eval.append_multilabel_results(y, outputs, loss)
+
+        if not self.multilabel:
+            self.result = self.eval.classification_summary()
+        else:
+            self.result = self.eval.multilabel_summary()
+
+    def run_reintegration_eval(self, dataloader):
+        """
+        Per-timestep reintegration evaluation.
+
+        For each scene in the dataloader:
+            - Run stable pass  (all-ones mask)
+            - Run masked pass  (Markov mask from dataloader)
+            - Find reintegration events (mask[t-1]==0, mask[t]==1)
+            - Record delta = stable_correct[t] - masked_correct[t] at each t_reint
+
+        Returns:
+            dict with keys:
+                mean_delta        : float  — mean accuracy gap at reintegration
+                delta_per_event   : list   — per-event delta values
+                n_reint_events    : int    — total reintegration events observed
+                uar_stable        : float  — UAR under stable condition
+                uar_masked        : float  — UAR under masked condition
+        """
+        self.global_model.eval()
+
+        all_preds_stable = []
+        all_preds_masked = []
+        all_labels       = []
+        delta_per_event  = []
+        n_reint_events   = 0
+
+        for batch_data in dataloader:
+            if self.args.modality != "multimodal":
+                continue   # reintegration analysis is multimodal only
+
+            (scene_x_a, scene_x_b,
+             scene_len_a, scene_len_b,
+             scene_labels, scene_mask) = batch_data
+
+            scene_labels = scene_labels.to(self.device)
+            scene_mask   = scene_mask.to(self.device)
+            T = scene_labels.shape[0]
+
+            # Stable pass
+            ones_mask = torch.ones(T, device=self.device, dtype=torch.long)
+            preds_stable, _ = self.global_model(
+                scene_x_a, scene_x_b,
+                scene_len_a, scene_len_b,
+                ones_mask, self.device
+            )
+
+            # Masked pass
+            preds_masked, _ = self.global_model(
+                scene_x_a, scene_x_b,
+                scene_len_a, scene_len_b,
+                scene_mask, self.device
+            )
+
+            # Argmax predictions
+            pred_s = preds_stable.argmax(dim=-1)   # (T,)
+            pred_m = preds_masked.argmax(dim=-1)   # (T,)
+            labels = scene_labels                  # (T,)
+
+            # Accumulate for global UAR
+            all_preds_stable.extend(pred_s.cpu().tolist())
+            all_preds_masked.extend(pred_m.cpu().tolist())
+            all_labels.extend(labels.cpu().tolist())
+
+            # Find reintegration events: mask[t-1]==0, mask[t]==1
+            mask_np = scene_mask.cpu().numpy()
+            for t in range(1, T):
+                if mask_np[t - 1] == 0 and mask_np[t] == 1:
+                    # reintegration event at utterance t
+                    correct_stable = int(pred_s[t].item() == labels[t].item())
+                    correct_masked = int(pred_m[t].item() == labels[t].item())
+                    delta = correct_stable - correct_masked
+                    delta_per_event.append(delta)
+                    n_reint_events += 1
+
+        # Compute UAR for both conditions
+        uar_stable = recall_score(
+            all_labels, all_preds_stable, average='macro', zero_division=0
+        ) * 100
+        uar_masked = recall_score(
+            all_labels, all_preds_masked, average='macro', zero_division=0
+        ) * 100
+
+        mean_delta = float(np.mean(delta_per_event)) if delta_per_event else 0.0
+
+        result = {
+            'mean_delta':       mean_delta,
+            'delta_per_event':  delta_per_event,
+            'n_reint_events':   n_reint_events,
+            'uar_stable':       uar_stable,
+            'uar_masked':       uar_masked,
+            'delta_uar':        uar_stable - uar_masked,
+        }
+
+        logging.info(
+            f'Reintegration eval: n_events={n_reint_events}, '
+            f'mean_delta={mean_delta:.4f}, '
+            f'UAR_stable={uar_stable:.2f}%, UAR_masked={uar_masked:.2f}%'
+        )
+        return result
+
+    # ── Remaining methods unchanged from original ─────────────────────────
 
     def get_num_params(self):
         model_parameters = filter(lambda p: p.requires_grad, self.global_model.parameters())
         num_params = sum([np.prod(p.size()) for p in model_parameters]) / 1000
         logging.info(f'Number of Parameters: {num_params} K')
         return num_params
-    
-    def inference(self, dataloader):
-        self.global_model.eval()
 
-        # initialize eval
-        self.eval = EvalMetric(self.multilabel)
-        for batch_idx, batch_data in enumerate(dataloader):
-                
-            self.global_model.zero_grad()
-            if self.args.modality == "multimodal":
-                #------------------------------------------------------------------------------------------------
-                ## ADDED FOR REINTEGRATION EXPERIMENTS
-                # x_a, x_b, l_a, l_b, y = batch_data
-                x_a, x_b, l_a, l_b, y, mask_a, mask_b = batch_data
-                #------------------------------------------------------------------------------------------------
-                x_a, x_b, y = x_a.to(self.device), x_b.to(self.device), y.to(self.device)
-                l_a, l_b = l_a.to(self.device), l_b.to(self.device)
-                mask_a = mask_a.to(self.device) if mask_a is not None else None
-                mask_b = mask_b.to(self.device) if mask_b is not None else None
-
-                # forward
-                # outputs, _ = self.global_model(
-                #     x_a.float(), x_b.float(), l_a, l_b,
-                #     mask_a=mask_a, mask_b=mask_b,
-                # )
-                #------------------------------------------------------------------------------------------------
-                ## ADDED FOR REINTEGRATION EXPERIMENTS
-                # forward
-                outputs, x_mm, aux_logits = self.global_model(
-                    x_a.float(), x_b.float(), l_a, l_b,
-                    mask_a=mask_a, mask_b=mask_b,
-                    return_aux=True,
-                )
-                #------------------------------------------------------------------------------------------------
-            else:
-                x, l, y = batch_data
-                x, l, y = x.to(self.device), l.to(self.device), y.to(self.device)
-                #------------------------------------------------------------------------------------------------
-                ## ADDED FOR REINTEGRATION EXPERIMENTS
-                aux_logits = None
-                #------------------------------------------------------------------------------------------------
-                # forward
-                outputs, _ = self.global_model(
-                    x.float(), l
-                )
-        
-            if not self.multilabel: 
-                outputs = torch.log_softmax(outputs, dim=1)
-            loss = self.criterion(outputs, y)
-            # save results
-            if not self.multilabel: 
-                self.eval.append_classification_results(
-                    y, outputs, loss
-                )
-            else:
-                self.eval.append_multilabel_results(
-                    y, outputs, loss
-                )
-                
-        # epoch train results
-        if not self.multilabel:
-            self.result = self.eval.classification_summary()
-        else:
-            self.result = self.eval.multilabel_summary()
-
-    def log_classification_result(
-            self, 
-            data_split: str, 
-            metric: str='uar'
-        ):
+    def log_classification_result(self, data_split: str, metric: str='uar'):
         if data_split == 'train':
-            loss = np.mean([data['loss'] for data in self.result_dict[self.epoch][data_split]])
-            acc = np.mean([data['acc'] for data in self.result_dict[self.epoch][data_split]])
-            uar = np.mean([data['uar'] for data in self.result_dict[self.epoch][data_split]])
-            top5_acc = np.mean([data['top5_acc'] for data in self.result_dict[self.epoch][data_split]])
-            f1 = np.mean([data['f1'] for data in self.result_dict[self.epoch][data_split]])
+            loss    = np.mean([d['loss']    for d in self.result_dict[self.epoch][data_split]])
+            acc     = np.mean([d['acc']     for d in self.result_dict[self.epoch][data_split]])
+            uar     = np.mean([d['uar']     for d in self.result_dict[self.epoch][data_split]])
+            top5_acc= np.mean([d['top5_acc']for d in self.result_dict[self.epoch][data_split]])
+            f1      = np.mean([d['f1']      for d in self.result_dict[self.epoch][data_split]])
         else:
-            loss = self.result_dict[self.epoch][data_split]['loss']
-            acc = self.result_dict[self.epoch][data_split]['acc']
-            uar = self.result_dict[self.epoch][data_split]['uar']
+            loss     = self.result_dict[self.epoch][data_split]['loss']
+            acc      = self.result_dict[self.epoch][data_split]['acc']
+            uar      = self.result_dict[self.epoch][data_split]['uar']
             top5_acc = self.result_dict[self.epoch][data_split]['top5_acc']
-            f1 = self.result_dict[self.epoch][data_split]['f1']
-            if metric == 'auc':
-                auc = self.result_dict[self.epoch][data_split]['auc']
+            f1       = self.result_dict[self.epoch][data_split]['f1']
 
-        # loggin console
         if data_split == 'train': logging.info(f'Current Round: {self.epoch}')
-        if metric == 'acc':
-            logging.info(f'{data_split} set, Loss: {loss:.3f}, Acc: {acc:.2f}%, Top-5 Acc: {top5_acc:.2f}%')
+        if metric == 'uar':
+            logging.info(f'{data_split} set, Loss: {loss:.3f}, UAR: {uar:.2f}%, Acc: {acc:.2f}%')
         elif metric == 'f1':
-            logging.info(f'{data_split} set, Loss: {loss:.3f}, Macro-F1: {f1:.2f}%, Top-1 Acc: {acc:.2f}%')
-        elif metric == 'uar':
-            logging.info(f'{data_split} set, Loss: {loss:.3f}, UAR: {uar:.2f}%, Top-1 Acc: {acc:.2f}%')
-        
-        if metric == 'auc' and data_split != 'train':
-            logging.info(f'{data_split} set, Loss: {loss:.3f}, AUC: {auc:.2f}%, Top-1 Acc: {acc:.2f}%')
-        # loggin to folder
-        self.log_writer.add_scalar(f'Loss/{data_split}', loss, self.epoch)
-        self.log_writer.add_scalar(f'Acc/{data_split}', acc, self.epoch)
-        self.log_writer.add_scalar(f'UAR/{data_split}', uar, self.epoch)
-        self.log_writer.add_scalar(f'F1/{data_split}', f1, self.epoch)
-        self.log_writer.add_scalar(f'Top5_Acc/{data_split}', top5_acc, self.epoch)
-        if metric == 'auc' and data_split != 'train': self.log_writer.add_scalar(f'AUC/{data_split}', auc, self.epoch)
-        
-    def log_multilabel_result(
-        self, 
-        data_split: str, 
-        metric: str='macro_f'
-    ):
-        if data_split == 'train':
-            loss = np.mean([data['loss'] for data in self.result_dict[self.epoch][data_split]])
-            acc = np.mean([data['acc'] for data in self.result_dict[self.epoch][data_split]])
-            macro_f = np.mean([data['macro_f'] for data in self.result_dict[self.epoch][data_split]])
-        else:
-            loss = self.result_dict[self.epoch][data_split]['loss']
-            acc = self.result_dict[self.epoch][data_split]['acc']
-            macro_f = self.result_dict[self.epoch][data_split]['macro_f']
+            logging.info(f'{data_split} set, Loss: {loss:.3f}, Macro-F1: {f1:.2f}%, Acc: {acc:.2f}%')
 
-        # logging to console
-        if data_split == 'train': 
-            logging.info(
-                f'Current Round: {self.epoch}'
-            )
-        logging.info(
-            f'{data_split} set, Loss: {loss:.3f}, Macro-F1: {macro_f:.2f}%, Top-1 Acc: {acc:.2f}%'
-        )
+        self.log_writer.add_scalar(f'Loss/{data_split}',    loss,     self.epoch)
+        self.log_writer.add_scalar(f'Acc/{data_split}',     acc,      self.epoch)
+        self.log_writer.add_scalar(f'UAR/{data_split}',     uar,      self.epoch)
+        self.log_writer.add_scalar(f'F1/{data_split}',      f1,       self.epoch)
+        self.log_writer.add_scalar(f'Top5_Acc/{data_split}',top5_acc, self.epoch)
 
-        # logging to folder
-        self.log_writer.add_scalar(f'Loss/{data_split}', loss, self.epoch)
-        self.log_writer.add_scalar(f'Acc/{data_split}', acc, self.epoch)
-        self.log_writer.add_scalar(f'Macro-F1/{data_split}', macro_f, self.epoch)
+    def save_result(self, file_path):
+        jsonString = json.dumps(self.result_dict, indent=4)
+        with open(str(file_path), "w") as f:
+            f.write(jsonString)
 
-    def save_result(
-        self, 
-        file_path
-    ):
-        jsonString = json.dumps(
-            self.result_dict, 
-            indent=4
-        )
-        jsonFile = open(str(file_path), "w")
-        jsonFile.write(jsonString)
-        jsonFile.close()
-
-    def save_train_updates(
-        self, 
-        model_updates: dict, 
-        num_sample: int, 
-        result: dict,
-        delta_control=None
-    ):
+    def save_train_updates(self, model_updates, num_sample, result, delta_control=None):
         self.model_updates.append(model_updates)
         self.num_samples_list.append(num_sample)
         self.result_dict[self.epoch]['train'].append(result)
         self.delta_controls.append(delta_control)
 
-    def log_epoch_result(
-        self, 
-        metric: str='acc'
-    ):
+    def log_epoch_result(self, metric: str='acc'):
         if len(self.best_test_dict) == 0:
-            self.best_epoch = self.epoch
-            self.best_dev_dict = self.result_dict[self.epoch]['dev']
+            self.best_epoch     = self.epoch
+            self.best_dev_dict  = self.result_dict[self.epoch]['dev']
             self.best_test_dict = self.result_dict[self.epoch]['test']
 
         if self.result_dict[self.epoch]['dev'][metric] > self.best_dev_dict[metric]:
-            # Save best model and training history
-            self.best_epoch = self.epoch
-            self.best_dev_dict = self.result_dict[self.epoch]['dev']
+            self.best_epoch     = self.epoch
+            self.best_dev_dict  = self.result_dict[self.epoch]['dev']
             self.best_test_dict = self.result_dict[self.epoch]['test']
             torch.save(
-                deepcopy(self.global_model.state_dict()), 
+                deepcopy(self.global_model.state_dict()),
                 str(self.result_path.joinpath('model.pt'))
             )
-        
-        # log dev results
-        best_dev_acc = self.best_dev_dict['acc']
-        if not self.multilabel:
-            best_dev_uar = self.best_dev_dict['uar']
-            best_dev_top5_acc = self.best_dev_dict['top5_acc']
-            best_dev_macro_f1 = self.best_dev_dict['f1']
-            if metric == "auc": best_dev_auc = self.best_dev_dict['auc']
-        else:
-            best_dev_macro_f1 = self.best_dev_dict['macro_f']
 
-        # log test results
+        best_dev_uar  = self.best_dev_dict['uar']
+        best_dev_acc  = self.best_dev_dict['acc']
+        best_test_uar = self.best_test_dict['uar']
         best_test_acc = self.best_test_dict['acc']
-        if not self.multilabel:
-            best_test_uar = self.best_test_dict['uar']
-            best_test_macro_f1 = self.best_test_dict['f1']
-            best_test_top5_acc = self.best_test_dict['top5_acc']
-            if metric == "auc": best_test_auc = self.best_test_dict['auc']
-        else:
-            best_test_macro_f1 = self.best_test_dict['macro_f']
-            
-        # logging
-        logging.info(f'Best epoch {self.best_epoch}')
-        if metric == 'acc':
-            logging.info(f'Best dev Top-1 Acc {best_dev_acc:.2f}%, Top-5 Acc {best_dev_top5_acc:.2f}%')
-            logging.info(f'Best test Top-1 Acc {best_test_acc:.2f}%, Top-5 Acc {best_test_top5_acc:.2f}%')
-        elif metric == 'macro_f':
-            logging.info(f'Best dev Macro-F1 {best_dev_macro_f1:.2f}%, Top-1 Acc {best_dev_acc:.2f}%')
-            logging.info(f'Best test Macro-F1 {best_test_macro_f1:.2f}%, Top-1 Acc {best_test_acc:.2f}%')
-        elif metric == 'f1':
-            logging.info(f'Best dev Macro-F1 {best_dev_macro_f1:.2f}%, Top-1 Acc {best_dev_acc:.2f}%')
-            logging.info(f'Best test Macro-F1 {best_test_macro_f1:.2f}%, Top-1 Acc {best_test_acc:.2f}%')
-        elif metric == 'auc':
-            logging.info(f'Best dev AUC {best_dev_auc:.2f}%, Top-1 Acc {best_dev_acc:.2f}%')
-            logging.info(f'Best test AUC {best_test_auc:.2f}%, Top-1 Acc {best_test_acc:.2f}%')
-        else:
-            logging.info(f'Best dev UAR {best_dev_uar:.2f}%, Top-1 Acc {best_dev_acc:.2f}%')
-            logging.info(f'Best test UAR {best_test_uar:.2f}%, Top-1 Acc {best_test_acc:.2f}%')
 
-    def summarize_results(self):
-        row_df = pd.DataFrame(index=[f'fold{self.fold_idx}'])
-        row_df['acc']  = self.best_test_dict['acc']
-        if not self.multilabel:
-            row_df['top5_acc'] = self.best_test_dict['top5_acc']
-            row_df['uar'] = self.best_test_dict['uar']
-        else:
-            row_df['macro_f'] = self.best_test_dict['macro_f']
-        return row_df
+        logging.info(f'Best epoch {self.best_epoch}')
+        logging.info(f'Best dev  UAR {best_dev_uar:.2f}%,  Acc {best_dev_acc:.2f}%')
+        logging.info(f'Best test UAR {best_test_uar:.2f}%, Acc {best_test_acc:.2f}%')
 
     def summarize_dict_results(self):
         result = dict()
-        result['acc'] = self.best_test_dict['acc']
-        if not self.multilabel:
-            result['top5_acc'] = self.best_test_dict['top5_acc']
-            result['uar'] = self.best_test_dict['uar']
-            result['f1'] = self.best_test_dict['f1']
-            if "auc" in self.best_test_dict: result['auc'] = self.best_test_dict['auc']
-        else:
-            result['macro_f'] = self.best_test_dict['macro_f']
+        result['acc']      = self.best_test_dict['acc']
+        result['top5_acc'] = self.best_test_dict['top5_acc']
+        result['uar']      = self.best_test_dict['uar']
+        result['f1']       = self.best_test_dict['f1']
         return result
 
     def average_weights(self):
-        """
-        Returns the average of the weights.
-        """
-        # there are no samples, return
-        if len(self.num_samples_list) == 0: 
+        if len(self.num_samples_list) == 0:
             return
         total_num_samples = np.sum(self.num_samples_list)
         w_avg = copy.deepcopy(self.model_updates[0])
 
-        # calculate weighted updates
         for key in w_avg.keys():
             if self.args.fed_alg == 'scaffold':
                 w_avg[key] = torch.div(self.model_updates[0][key], len(self.model_updates))
             else:
-                w_avg[key] = self.model_updates[0][key]*(self.num_samples_list[0]/total_num_samples)
+                w_avg[key] = self.model_updates[0][key] * (self.num_samples_list[0] / total_num_samples)
+
         for key in w_avg.keys():
             for i in range(1, len(self.model_updates)):
                 if self.args.fed_alg == 'scaffold':
                     w_avg[key] += torch.div(self.model_updates[i][key], len(self.model_updates))
                 else:
-                    w_avg[key] += torch.div(self.model_updates[i][key]*self.num_samples_list[i], total_num_samples)
-        
-        # server optimization or just load with weights
+                    w_avg[key] += torch.div(
+                        self.model_updates[i][key] * self.num_samples_list[i],
+                        total_num_samples
+                    )
+
         if self.args.fed_alg == 'fed_opt':
             self.update_global(copy.deepcopy(w_avg))
         else:
             self.global_model.load_state_dict(copy.deepcopy(w_avg))
 
-        # update global control if algorithm is scaffold
         if self.args.fed_alg == 'scaffold':
             self.update_server_control()
 
-    def update_server_control(self):
-        # update server control
-        total_num_samples = np.sum(self.num_samples_list)
-        delta_avg = copy.deepcopy(self.delta_controls[0])
-        new_control = copy.deepcopy(self.server_control)
+    def save_json_file(self, data_dict, data_path):
+        jsonString = json.dumps(data_dict, indent=4)
+        with open(str(data_path), "w") as f:
+            f.write(jsonString)
 
-        for key in delta_avg.keys():
-            delta_avg[key] = torch.div(self.delta_controls[0][key], self.num_of_clients)
-            
-        for key in delta_avg.keys():
-            for idx in range(1, len(self.delta_controls)):
-                delta_avg[key] += torch.div(self.delta_controls[idx][key], self.num_of_clients)
-            new_control[key] = new_control[key] - delta_avg[key]
-        self.server_control = copy.deepcopy(new_control)
-        
-    def update_global(
-        self, 
-        update_weights
-    ):
-        # zero_grad
-        self.global_optimizer.zero_grad()
-        global_optimizer_state = self.global_optimizer.state_dict()
-
-        # new_model
-        new_model = copy.deepcopy(self.global_model)
-        new_model.load_state_dict(update_weights, strict=True)
-
-        # set global_model gradient
-        with torch.no_grad():
-            for param, new_param in zip(
-                self.global_model.parameters(), new_model.parameters()
-            ):
-                param.grad = (param.data - new_param.data) / self.args.learning_rate
-
-        # replace some non-parameters's state dict
-        state_dict = self.global_model.state_dict()
-        for name in dict(self.global_model.named_parameters()).keys():
-            update_weights[name] = state_dict[name]
-        self.global_model.load_state_dict(update_weights, strict=True)
-
-        # optimization
-        self.global_optimizer = self._initialize_global_optimizer()
-        self.global_optimizer.load_state_dict(global_optimizer_state)
-        self.global_optimizer.step()
-
-    def set_save_json_file(
-        self, 
-        file_path
-    ):
-        self.save_json_path = file_path
-
-
-    def save_json_file(
-        self, 
-        data_dict, 
-        data_path
-    ):
-        jsonString = json.dumps(
-            data_dict, 
-            indent=4
-        )
-        jsonFile = open(str(data_path), "w")
-        jsonFile.write(jsonString)
-        jsonFile.close()
-
-    # scaffold init contral
     def init_control(self, model):
-        """ a dict type: {name: params}
-        """
-        control = {
-            name: torch.zeros_like(
-                p.data
-            ).cpu() for name, p in model.state_dict().items()
+        return {
+            name: torch.zeros_like(p.data).cpu()
+            for name, p in model.state_dict().items()
         }
-        return control
 
-    def set_control_device(
-        self, 
-        control, 
-        device=True
-    ):
+    def set_control_device(self, control, device=True):
         for name in control.keys():
-            if device == True:
-                control[name] = control[name].to(self.device)
-            else:
-                control[name] = control[name].cpu()
+            control[name] = control[name].to(self.device) if device else control[name].cpu()

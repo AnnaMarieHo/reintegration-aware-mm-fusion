@@ -1,21 +1,25 @@
 """
 Train temporal missingness model for the MELD dataset.
 Usage:
-    python train.py 
-    --hid_size 128
-    --sample_rate 0.1 
-    --learning_rate 0.01 
-    --global_learning_rate 0.005 
-    --num_epochs 200 
-    --en_att 
-    --att_name fuse_base
-    --fed_alg fed_avg 
-    --en_missing_modality
-    --missing_modailty_rate 0.3
+
+python -m my_extensions.reintegration.train
+    --dataset meld
+    --modality multimodal     
+    --audio_feat mfcc     
+    --text_feat mobilebert     
+    --fed_alg fed_avg     
+    --num_epochs 200     
+    --local_epochs 1     
+    --sample_rate 1.0     
+    --batch_size 16     
+    --hid_size 128     
+    --learning_rate 0.01     
+    --en_att     
+    --att_name fuse_base     
     --availability_process markov
-    --availability_sidecar_path /path/to/availability.pkl
 """
 import torch
+import json
 import random
 import numpy as np
 import torch.nn as nn
@@ -28,9 +32,9 @@ from pathlib import Path
 
 
 from my_extensions.reintegration.constants import constants
-from my_extensions.reintegration.server_trainer import Server
-from my_extensions.reintegration.mm_models import SERClassifier
-from my_extensions.reintegration.dataload_manager import DataloadManager
+from my_extensions.reintegration.trainers.server_trainer import Server
+from my_extensions.reintegration.model.mm_models import SERClassifier, SceneGRUWrapper
+from my_extensions.reintegration.dataloader.dataload_manager import DataloadManager
 
 # from my_extensions.reintegration.trainers.fed_rs_trainer import ClientFedRS
 from my_extensions.reintegration.trainers.fed_avg_trainer import ClientFedAvg
@@ -39,7 +43,7 @@ from my_extensions.reintegration.trainers.fed_avg_trainer import ClientFedAvg
 import sys
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).resolve().parents[4]))
+# sys.path.append(str(Path(__file__).resolve().parents[4]))
 
 # define logging console
 import logging
@@ -61,16 +65,18 @@ def set_seed(seed):
 def parse_args():
     # read path config files
     path_conf = dict()
-    with open(str(Path(os.path.realpath(__file__)).parents[2].joinpath('system.cfg'))) as f:
+    with open(str(Path(os.path.realpath(__file__)).parents[0].joinpath('system.cfg'))) as f:
+    # with open(str(Path(os.path.realpath(__file__)).joinpath('system.cfg'))) as f:
         for line in f:
             key, val = line.strip().split('=')
             path_conf[key] = val.replace("\"", "")
 
     # If default setting
     if path_conf["data_dir"] == ".":
-        path_conf["data_dir"] = str(Path(os.path.realpath(__file__)).parents[2].joinpath('data'))
+        # path_conf["data_dir"] = str(Path(os.path.realpath(__file__)).parents[2].joinpath('data'))
+        path_conf["data_dir"] = str(Path(os.path.realpath(__file__)).parents[0].joinpath('feature'))
     if path_conf["output_dir"] == ".":
-        path_conf["output_dir"] = str(Path(os.path.realpath(__file__)).parents[2].joinpath('output'))
+        path_conf["output_dir"] = str(Path(os.path.realpath(__file__)).parents[0].joinpath('output'))
 
     parser = argparse.ArgumentParser(description='FedMultimoda experiments')
     parser.add_argument(
@@ -297,8 +303,6 @@ if __name__ == '__main__':
     # data manager
     dm = DataloadManager(args)
     dm.get_text_feat_path()
-    dm.get_simulation_setting()
-    
     # find device
     device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
     if torch.cuda.is_available(): print('GPU available, use GPU')
@@ -312,7 +316,11 @@ if __name__ == '__main__':
         # Client = ClientFedRS
 
     # load simulation feature
-    dm.load_sim_dict()
+    # Load partition so we have scene structure for label dist and dataloaders
+    partition_path = Path(args.data_dir).joinpath('partition', args.dataset, 'partition.json')
+    with open(str(partition_path)) as f:
+        partition = json.load(f)
+
     # load client ids
     dm.get_client_ids()
     # set dataloaders
@@ -320,31 +328,32 @@ if __name__ == '__main__':
     logging.info('Reading Data')
 
     for client_id in tqdm(dm.client_ids):
-        audio_dict = dm.load_audio_feat(
-            client_id=client_id
-        )
-        text_dict = dm.load_text_feat(
-            client_id=client_id
-        )
+        audio_feat_dict = dm.load_audio_feat(client_id=client_id)
+        text_feat_dict  = dm.load_text_feat(client_id=client_id)
 
-        dm.get_label_dist(
-            text_dict, 
-            client_id
-        )
+        # scenes for this client/split from partition (nested: scenes → utterances)
+        scenes = partition[str(client_id)]
 
-        shuffle = False if client_id in ['dev', 'test'] else True
-        client_sim_dict = None if client_id in ['dev', 'test'] else dm.get_client_sim_dict(client_id=client_id)
-        dataloader_dict[client_id] = dm.set_dataloader(
-            audio_dict, 
-            text_dict, 
-            shuffle=shuffle,
-            client_sim_dict=client_sim_dict,
-            default_feat_shape_a=np.array([1000, constants.feature_len_dict["mfcc"]]),
-            default_feat_shape_b=np.array([10, constants.feature_len_dict["mobilebert"]]),
-            #------------------------------------------------------------------------------------------------
-            ## ADDED FOR REINTEGRATION EXPERIMENTS
-            client_id=client_id,
-            #------------------------------------------------------------------------------------------------
+        dm.get_label_dist(scenes, client_id)
+
+        shuffle    = client_id not in ['dev', 'test']
+        # apply_mask=True for all splits: training uses forward_two_pass so the
+        # stable pass is generated internally; dev/test need Markov masks so that
+        # run_reintegration_eval can find reintegration events (mask[t-1]==0, mask[t]==1).
+        # server.inference() evaluates on the masked condition for UAR tracking,
+        # which gives the conservative (harder) estimate — appropriate as the main metric.
+        apply_mask = True
+
+        dataloader_dict[client_id] = dm.set_scene_dataloader(
+            scenes          = scenes,
+            audio_feat_dict = audio_feat_dict,
+            text_feat_dict  = text_feat_dict,
+            default_feat_shape_a = np.array([1000, constants.feature_len_dict["mfcc"]]),
+            default_feat_shape_b = np.array([10,   constants.feature_len_dict["mobilebert"]]),
+            p_stay_absent   = 0.7,
+            p_stay_present  = 0.75,
+            shuffle         = shuffle,
+            apply_mask      = apply_mask,
         )
         
     # pdb.set_trace()
@@ -359,13 +368,22 @@ if __name__ == '__main__':
         # loss function
         criterion = nn.NLLLoss().to(device)
         # Define the model
-        global_model = SERClassifier(
+        # SERClassifier: utterance-level encoder (intra-utterance features)
+        # SceneGRUWrapper: cross-utterance GRU wrapper
+        # The scene GRU hidden state carries absence history across utterances,
+        # which is the mechanism through which reintegration effects manifest.
+        utterance_encoder = SERClassifier(
             num_classes=constants.num_class_dict[args.dataset],
             audio_input_dim=constants.feature_len_dict[args.audio_feat],
             text_input_dim=constants.feature_len_dict[args.text_feat],
             d_hid=args.hid_size,
             en_att=args.att,
             att_name=args.att_name,
+        )
+        global_model = SceneGRUWrapper(
+            utterance_encoder=utterance_encoder,
+            num_classes=constants.num_class_dict[args.dataset],
+            d_hid=args.hid_size,
         )
         global_model = global_model.to(device)
 
@@ -513,34 +531,26 @@ if __name__ == '__main__':
         )
         if _reint_ok:
             try:
-                from my_extensions.reintegration.metrics import run_reintegration_eval
                 with torch.no_grad():
-                    reint_dev = run_reintegration_eval(
-                        server.global_model,
-                        dataloader_dict['dev'],
-                        device,
-                        multilabel=(args.dataset == 'ptb-xl'),
-                    )
-                    reint_test = run_reintegration_eval(
-                        server.global_model,
-                        dataloader_dict['test'],
-                        device,
-                        multilabel=(args.dataset == 'ptb-xl'),
-                    )
-                save_result_dict[f'fold{fold_idx}']['reintegration_dev'] = reint_dev
+                    # Reintegration eval uses server.run_reintegration_eval()
+                    # which performs the within-scene stable vs masked contrast
+                    # and reports mean_delta, n_reint_events, UAR per condition.
+                    reint_dev  = server.run_reintegration_eval(dataloader_dict['dev'])
+                    reint_test = server.run_reintegration_eval(dataloader_dict['test'])
+                save_result_dict[f'fold{fold_idx}']['reintegration_dev']  = reint_dev
                 save_result_dict[f'fold{fold_idx}']['reintegration_test'] = reint_test
-                _dev_acc = (reint_dev.get('acc_reint'), reint_dev.get('acc_no_reint'), reint_dev.get('conf_reint'), reint_dev.get('conf_no_reint'))
-                _dev_ev = (reint_dev['event_counts']['total_off_on_events'], reint_dev['event_counts']['num_samples_with_reint'], reint_dev.get('event_counts_aux', {}).get('total_off_on_events', 'n/a'))
-                _test_acc = (reint_test.get('acc_reint'), reint_test.get('acc_no_reint'), reint_test.get('conf_reint'), reint_test.get('conf_no_reint'))
-                _test_ev = (reint_test['event_counts']['total_off_on_events'], reint_test['event_counts']['num_samples_with_reint'], reint_test.get('event_counts_aux', {}).get('total_off_on_events', 'n/a'))
-                logging.info("Reintegration dev: acc_reint=%.2f acc_no_reint=%.2f conf_reint=%.3f conf_no_reint=%.3f", *_dev_acc)
-                logging.info("Reintegration dev: n_reint=%s n_no_reint=%s correct_reint=%s correct_no_reint=%s", reint_dev.get('num_samples_reint'), reint_dev.get('num_samples_no_reint'), reint_dev.get('num_correct_reint'), reint_dev.get('num_correct_no_reint'))
-                logging.info("Reintegration dev: events=%s samples_with_reint=%s events_aux=%s", *_dev_ev)
-                logging.info("Reintegration test: acc_reint=%.2f acc_no_reint=%.2f conf_reint=%.3f conf_no_reint=%.3f", *_test_acc)
-                logging.info("Reintegration test: n_reint=%s n_no_reint=%s correct_reint=%s correct_no_reint=%s", reint_test.get('num_samples_reint'), reint_test.get('num_samples_no_reint'), reint_test.get('num_correct_reint'), reint_test.get('num_correct_no_reint'))
-                logging.info("Reintegration test: events=%s samples_with_reint=%s events_aux=%s", *_test_ev)
-                print("Reintegration dev:", reint_dev)
-                print("Reintegration test:", reint_test)
+                logging.info(
+                    "Reintegration dev:  mean_delta=%.4f, n_events=%d, "
+                    "UAR_stable=%.2f%%, UAR_masked=%.2f%%",
+                    reint_dev['mean_delta'], reint_dev['n_reint_events'],
+                    reint_dev['uar_stable'], reint_dev['uar_masked']
+                )
+                logging.info(
+                    "Reintegration test: mean_delta=%.4f, n_events=%d, "
+                    "UAR_stable=%.2f%%, UAR_masked=%.2f%%",
+                    reint_test['mean_delta'], reint_test['n_reint_events'],
+                    reint_test['uar_stable'], reint_test['uar_masked']
+                )
             except Exception as e:
                 logging.exception("Reintegration eval failed: %s", e)
                 print("Reintegration eval FAILED:", e)

@@ -13,6 +13,9 @@ from tqdm import tqdm
 from pathlib import Path
 from collections import Counter
 from torch.utils.data import DataLoader, Dataset
+from .scene_dataloader import build_scene_dataloader
+
+
 
 def pad_tensor(vec, pad):
     pad_size = list(vec.shape)
@@ -346,20 +349,72 @@ class DataloadManager():
     #------------------------------------------------------------------------------------------------
     
     def get_label_dist(
-        self, 
-        data_dict,
+        self,
+        scenes: list,
         client_id: str
     ):
         """
-        Set dataloader for training/dev/test.
-        :param data_dict: data dictionary
-        :return: data_dis_dict
+        Compute label distribution from a list of scenes.
+        :param scenes: list of scenes, each scene is a list of utterance rows
+                       utterance row: [Filename, Path, Label, Utterance, None]
+        :param client_id: client identifier
         """
-        label_list = list()
-        for idx in range(len(data_dict)):
-            label_list.append(data_dict[idx][-2])
+        label_list = []
+        for scene in scenes:
+            for utt in scene:
+                label_list.append(utt[2])   # Label is at index 2
         self.label_dist_dict[client_id] = Counter(label_list)
         
+    def set_scene_dataloader(
+        self,
+        scenes: list,
+        audio_feat_dict: dict,
+        text_feat_dict: dict,
+        default_feat_shape_a: np.array = np.array([1000, 80]),
+        default_feat_shape_b: np.array = np.array([10, 512]),
+        p_stay_absent: float = 0.7,
+        p_stay_present: float = 0.75,
+        shuffle: bool = False,
+        apply_mask: bool = True,
+    ) -> DataLoader:
+        """
+        Scene-level dataloader for reintegration experiments.
+
+        Args:
+            scenes:           list of scenes from partition.json
+                              partition[client_id] = list of scenes
+                              scene = list of utterances
+                              utt   = [Filename, Path, Label, Utterance, None]
+            audio_feat_dict:  filename-keyed dict from extract_audio_features_scene.py
+                              e.g. {'dia64_utt3': np.ndarray(T_frames, 80)}
+            text_feat_dict:   filename-keyed dict from extract_text_features_scene.py
+                              e.g. {'dia64_utt3': np.ndarray(T_tokens, 512)}
+            default_feat_shape_a: fallback shape if filename missing (T_frames, D_audio)
+            default_feat_shape_b: fallback shape if filename missing (T_tokens, D_text)
+            p_stay_absent:    P(absent→absent) Markov parameter
+            p_stay_present:   P(present→present) Markov parameter
+            shuffle:          True for training clients, False for dev/test
+            apply_mask:       True applies Markov mask; False yields all-ones mask
+                              (stable condition). Training always uses True since
+                              SceneGRUWrapper.forward_two_pass() handles the stable
+                              pass internally.
+        Returns:
+            DataLoader yielding one scene per iteration.
+            Each batch: (scene_x_a, scene_x_b, scene_len_a, scene_len_b,
+                         scene_labels, scene_mask)
+        """
+        return build_scene_dataloader(
+            scenes          = scenes,
+            audio_feat_dict = audio_feat_dict,
+            text_feat_dict  = text_feat_dict,
+            default_shape_a = default_feat_shape_a,
+            default_shape_b = default_feat_shape_b,
+            p_stay_absent   = p_stay_absent,
+            p_stay_present  = p_stay_present,
+            apply_mask      = apply_mask,
+            shuffle         = shuffle,
+        )
+
     def set_dataloader(
             self, 
             data_a: dict,
