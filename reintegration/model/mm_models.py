@@ -3,12 +3,16 @@
 """
 @author: Tiantian
 
-Modified for reintegration experiments:
-    - SERClassifier unchanged (utterance-level encoder)
-    - SceneGRUWrapper added: wraps SERClassifier with a cross-utterance GRU
-      so that hidden state persists across utterances within a scene.
-      This is the mechanism through which absence history at t=3,4 shapes
-      the model's behaviour at the reintegration boundary t=5.
+Modified for reintegration experiments — Phase 1.
+
+    SERClassifier  : utterance-level encoder, unchanged from FedMultimodal.
+    SceneGRUWrapper: wraps SERClassifier with a cross-utterance GRU so that
+                     hidden state persists across utterances within a scene.
+
+Phase 1 only: the model is trained on stable (full-audio) scenes.
+At test time, run_reintegration_eval() calls forward() twice — once with an
+all-ones mask and once with the Markov mask — to measure the reintegration dip.
+forward_two_pass and all auxiliary-loss infrastructure have been removed.
 """
 import pdb
 import torch
@@ -29,7 +33,7 @@ from typing import Dict, Iterable, Optional
 
 class SERClassifier(nn.Module):
     def __init__(
-        self, 
+        self,
         num_classes: int,
         audio_input_dim: int,
         text_input_dim: int,
@@ -41,30 +45,30 @@ class SERClassifier(nn.Module):
     ):
         super(SERClassifier, self).__init__()
         self.dropout_p = 0.1
-        self.en_att = en_att
-        self.att_name = att_name
-        
+        self.en_att    = en_att
+        self.att_name  = att_name
+
         self.audio_conv = Conv1dEncoder(
-            input_dim=audio_input_dim, 
-            n_filters=n_filters, 
-            dropout=self.dropout_p, 
+            input_dim=audio_input_dim,
+            n_filters=n_filters,
+            dropout=self.dropout_p,
         )
-        
+
         self.audio_rnn = nn.GRU(
-            input_size=n_filters*4, 
-            hidden_size=d_hid, 
-            num_layers=1, 
-            batch_first=True, 
-            dropout=self.dropout_p, 
+            input_size=n_filters*4,
+            hidden_size=d_hid,
+            num_layers=1,
+            batch_first=True,
+            dropout=self.dropout_p,
             bidirectional=False
         )
 
         self.text_rnn = nn.GRU(
-            input_size=text_input_dim, 
-            hidden_size=d_hid, 
-            num_layers=1, 
-            batch_first=True, 
-            dropout=self.dropout_p, 
+            input_size=text_input_dim,
+            hidden_size=d_hid,
+            num_layers=1,
+            batch_first=True,
+            dropout=self.dropout_p,
             bidirectional=False
         )
 
@@ -80,14 +84,10 @@ class SERClassifier(nn.Module):
             self.text_att  = BaseSelfAttention(d_hid=d_hid)
         elif self.att_name == "fuse_base":
             self.fuse_att = FuseBaseSelfAttention(d_hid=d_hid, d_head=d_head)
-        
+
         if self.en_att and self.att_name == "fuse_base":
             self.classifier = nn.Sequential(
                 nn.Linear(d_hid*d_head, 64), nn.ReLU(),
-                nn.Dropout(self.dropout_p), nn.Linear(64, num_classes)
-            )
-            self.aux_head = nn.Sequential(
-                nn.Linear(d_hid, 64), nn.ReLU(),
                 nn.Dropout(self.dropout_p), nn.Linear(64, num_classes)
             )
         else:
@@ -98,11 +98,7 @@ class SERClassifier(nn.Module):
                 nn.Linear(d_hid*2, 64), nn.ReLU(),
                 nn.Dropout(self.dropout_p), nn.Linear(64, num_classes)
             )
-            self.aux_head = nn.Sequential(
-                nn.Linear(d_hid, 64), nn.ReLU(),
-                nn.Dropout(self.dropout_p), nn.Linear(64, num_classes)
-            )
-        
+
     def init_weight(self):
         for m in self._modules:
             if type(m) == nn.Linear:
@@ -122,15 +118,13 @@ class SERClassifier(nn.Module):
         mask = mask.view(B, -1, factor).any(dim=2)
         return mask[:, :target_len]
 
-    def forward(self, x_audio, x_text, len_a, len_t, mask_a=None, mask_b=None, return_aux=False):
+    def forward(self, x_audio, x_text, len_a, len_t, mask_a=None, mask_b=None):
         """
         Utterance-level forward pass.
-        Returns (preds, x_mm) — the embedding x_mm is consumed by SceneGRUWrapper.
-        return_aux=False by default here because the scene wrapper manages
-        per-timestep classification; aux_head is not used in the scene pipeline.
+        Returns (preds, x_mm) — x_mm is consumed by SceneGRUWrapper.
         """
         x_audio = self.audio_conv(x_audio)
-        
+
         len_a = len_a // 8
         len_a[len_a == 0] = 1
         a_max_len = x_audio.shape[1]
@@ -159,18 +153,6 @@ class SERClassifier(nn.Module):
             x_audio, _ = pad_packed_sequence(x_audio, batch_first=True)
         if len_t[0] != 0:
             x_text,  _ = pad_packed_sequence(x_text,  batch_first=True)
-
-        aux_logits = None
-        if return_aux:
-            # Pool audio frames to utterance-level vector before aux classifier.
-            # Use mask_a_reduced to exclude absent/padding frames from the mean.
-            if mask_a_reduced is not None:
-                weights      = mask_a_reduced.unsqueeze(-1).float()      # (B, T_a, 1)
-                denom        = weights.sum(dim=1).clamp(min=1.0)         # (B, 1)
-                audio_pooled = (x_audio * weights).sum(dim=1) / denom   # (B, d_hid)
-            else:
-                audio_pooled = x_audio.mean(dim=1)                      # (B, d_hid)
-            aux_logits = self.aux_head(audio_pooled)                    # (B, num_classes)
 
         if self.en_att:
             if self.att_name == 'multihead':
@@ -207,14 +189,11 @@ class SERClassifier(nn.Module):
             x_mm    = torch.cat((x_audio, x_text), dim=1)
 
         preds = self.classifier(x_mm)
-
-        if return_aux:
-            return preds, x_mm, aux_logits
         return preds, x_mm
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Scene-level temporal wrapper — NEW
+# Scene-level temporal wrapper
 #
 # Wraps SERClassifier with a cross-utterance GRU so that hidden state
 # persists across utterances t=0..T within a scene.
@@ -226,28 +205,26 @@ class SERClassifier(nn.Module):
 # The reintegration effect is measured at the utterance t where audio returns:
 #   h_{t-1} was shaped by absence turns → does pred[t] dip vs stable?
 #
-# Input contract (from dataloader):
-#   x_a_scene:  (T, B_utt, T_frames, D_audio)   — audio frames per utterance
-#   x_b_scene:  (T, B_utt, T_tokens, D_text)    — text tokens per utterance
-#   len_a_scene:(T, B_utt)
-#   len_b_scene:(T, B_utt)
-#   mask_scene: (T,) int {0,1}                  — per-utterance audio mask
-#   labels:     (T,)                             — per-utterance emotion label
-#
-# During training B_utt=1 (one scene at a time); batching is across scenes.
+# Phase 1: only forward() is used. The model is trained on stable scenes
+# (all audio present). At test time, run_reintegration_eval() calls forward()
+# twice on each test scene — once with an all-ones mask (stable condition)
+# and once with the Markov mask (reintegration condition) — and records the
+# per-timestep delta at t_reint.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SceneGRUWrapper(nn.Module):
     """
-    Scene-level temporal model for reintegration experiments.
+    Scene-level temporal model for reintegration experiments (Phase 1).
 
     Architecture:
-        utterance_encoder  : SERClassifier  (intra-utterance features)
-        scene_gru          : GRU            (cross-utterance hidden state)
-        scene_classifier   : Linear         (per-timestep prediction head)
+        utterance_encoder : SERClassifier  (intra-utterance features)
+        scene_gru         : GRU            (cross-utterance hidden state)
+        scene_classifier  : Linear         (per-timestep prediction head)
 
     The scene_gru hidden state is the mechanism through which availability
-    history shapes predictions at the reintegration boundary.
+    history shapes predictions at the reintegration boundary. Because the
+    model is never trained on absent audio, h_{t-1} after an absence run
+    carries a degraded representation that produces the dip at t_reint.
     """
 
     def __init__(
@@ -265,18 +242,17 @@ class SceneGRUWrapper(nn.Module):
         self.d_hid = d_hid
 
         # Infer embedding dim from utterance encoder output.
-        # SERClassifier without fuse_base: x_mm = cat(audio_proj, text_proj) → d_hid*2
-        # SERClassifier with fuse_base:    x_mm = d_hid * d_head
-        # We detect this from the classifier's first Linear in_features.
+        # Without fuse_base: x_mm = cat(audio_proj, text_proj) → d_hid*2
+        # With fuse_base:    x_mm = d_hid * d_head
         first_linear = utterance_encoder.classifier[0]
-        self.utt_emb_dim = first_linear.in_features   # e.g. 128 or d_hid*d_head
+        self.utt_emb_dim = first_linear.in_features
 
         # Cross-utterance GRU — hidden state carries absence history
         self.scene_gru = nn.GRU(
             input_size=self.utt_emb_dim,
             hidden_size=d_hid,
             num_layers=scene_gru_layers,
-            batch_first=True,       # input: (batch=1, T_scene, utt_emb_dim)
+            batch_first=True,
             dropout=dropout if scene_gru_layers > 1 else 0.0,
             bidirectional=False,    # causal: must not look ahead
         )
@@ -298,37 +274,35 @@ class SceneGRUWrapper(nn.Module):
         """
         Run SERClassifier on all T utterances in a single batched forward pass.
 
-        All utterances are padded to the longest audio / text length in the
-        scene and passed as a batch of size T. pack_padded_sequence handles
-        the variable lengths within the batch, so the existing SERClassifier
-        forward is called exactly once per scene instead of T times.
+        All utterances are padded to the longest audio/text length in the scene
+        and passed as a batch of size T. pack_padded_sequence handles variable
+        lengths, so SERClassifier.forward is called exactly once per scene.
 
         Returns:
             embeddings: (1, T, utt_emb_dim)
         """
         T = len(x_a_scene)
 
-        # ── Lengths ───────────────────────────────────────────────────────
         len_a = torch.cat([len_a_scene[t] for t in range(T)], dim=0).to(device)  # (T,)
         len_b = torch.cat([len_b_scene[t] for t in range(T)], dim=0).to(device)  # (T,)
 
-        # ── Pad audio to (T, max_T_frames, D_audio) ───────────────────────
+        # Pad audio to (T, max_T_frames, D_audio)
         max_a = max(x_a_scene[t].shape[1] for t in range(T))
         D_a   = x_a_scene[0].shape[2]
         x_a_batch = torch.zeros(T, max_a, D_a, device=device, dtype=torch.float32)
         for t in range(T):
-            fa = x_a_scene[t].squeeze(0).to(device)   # (T_frames, D_audio)
+            fa = x_a_scene[t].squeeze(0).to(device)
             x_a_batch[t, :fa.shape[0], :] = fa
 
-        # ── Pad text to (T, max_T_tokens, D_text) ─────────────────────────
+        # Pad text to (T, max_T_tokens, D_text)
         max_b = max(x_b_scene[t].shape[1] for t in range(T))
         D_b   = x_b_scene[0].shape[2]
         x_b_batch = torch.zeros(T, max_b, D_b, device=device, dtype=torch.float32)
         for t in range(T):
-            fb = x_b_scene[t].squeeze(0).to(device)   # (T_tokens, D_text)
+            fb = x_b_scene[t].squeeze(0).to(device)
             x_b_batch[t, :fb.shape[0], :] = fb
 
-        # ── Frame-level audio availability mask (T, max_T_frames) ─────────
+        # Frame-level audio availability mask (T, max_T_frames)
         # mask_scene[t]==0 → zero out all frames for utterance t
         mask_a = torch.zeros(T, max_a, device=device, dtype=torch.bool)
         for t in range(T):
@@ -336,15 +310,12 @@ class SceneGRUWrapper(nn.Module):
                 fa_len = x_a_scene[t].shape[1]
                 mask_a[t, :fa_len] = True
 
-        # ── Single SERClassifier forward for all T utterances ─────────────
         _, x_mm_batch = self.utterance_encoder(
             x_a_batch, x_b_batch, len_a, len_b,
             mask_a=mask_a, mask_b=None,
-            return_aux=False,
         )
         # x_mm_batch: (T, utt_emb_dim)
 
-        # Reshape to (1, T, utt_emb_dim) for scene_gru
         embeddings = x_mm_batch.unsqueeze(0)   # (1, T, utt_emb_dim)
         return embeddings
 
@@ -360,194 +331,24 @@ class SceneGRUWrapper(nn.Module):
         """
         Full scene forward pass.
 
+        Called during training (stable mask) and by run_reintegration_eval
+        (stable mask and Markov mask on the same scene).
+
         Returns:
-            preds:      (T, num_classes)  — per-utterance logits
-            scene_hidden: (T, d_hid)     — scene GRU hidden states (for analysis)
+            preds        : (T, num_classes) — per-utterance logits
+            scene_hidden : (T, d_hid)       — GRU hidden states (for analysis)
         """
-        # 1. Encode each utterance → (1, T, utt_emb_dim)
         embeddings = self.encode_utterances(
             x_a_scene, x_b_scene, len_a_scene, len_b_scene,
             mask_scene, device
         )
         embeddings = self.dropout(embeddings)
 
-        # 2. Scene GRU: hidden state persists across utterances
-        #    Output shape: (1, T, d_hid)
-        #    h[t] encodes everything seen up to and including utterance t,
-        #    including any absence runs leading up to a reintegration event.
-        scene_out, _ = self.scene_gru(embeddings)   # (1, T, d_hid)
-        scene_out = scene_out.squeeze(0)             # (T, d_hid)
-
-        # 3. Per-timestep classification
-        preds = self.scene_classifier(scene_out)     # (T, num_classes)
-
-        return preds, scene_out
-
-    def _build_text_batch(self, x_b_scene, len_b_scene, device):
-        """
-        Pack all T text utterances into a batch, run text_rnn once, return
-        padded output and the length / shape info needed for fuse_att.
-
-        Returns:
-            x_text:  (T, max_T_tokens, d_hid)  — padded text RNN output
-            len_b:   (T,)                       — token counts (post pack)
-            max_b:   int                        — padded sequence length
-        """
-        T     = len(x_b_scene)
-        len_b = torch.cat([len_b_scene[t] for t in range(T)], dim=0).to(device)  # (T,)
-        max_b = max(x_b_scene[t].shape[1] for t in range(T))
-        D_b   = x_b_scene[0].shape[2]
-
-        x_b_batch = torch.zeros(T, max_b, D_b, device=device, dtype=torch.float32)
-        for t in range(T):
-            fb = x_b_scene[t].squeeze(0).to(device)
-            x_b_batch[t, :fb.shape[0], :] = fb
-
-        enc = self.utterance_encoder
-        if len_b[0] != 0:
-            packed = pack_padded_sequence(
-                x_b_batch, len_b.cpu().numpy(),
-                batch_first=True, enforce_sorted=False
-            )
-        else:
-            packed = x_b_batch
-        x_text, _ = enc.text_rnn(packed)
-        if len_b[0] != 0:
-            x_text, _ = pad_packed_sequence(x_text, batch_first=True)
-
-        return x_text, len_b, x_text.shape[1]
-
-    def _audio_and_fuse(self, x_a_scene, len_a_scene, mask_scene,
-                        x_text, len_b, device, return_aux=False):
-        """
-        Run conv + audio_rnn + fuse_att for one audio mask condition.
-        x_text is already computed and passed in (shared across passes).
-
-        Args:
-            return_aux: if True, also return aux_logits (T, num_classes) from
-                        the audio-only head. Use on the stable pass only to
-                        compute the auxiliary audio loss that prevents text dominance.
-
-        Returns:
-            embeddings:  (1, T, utt_emb_dim)
-            aux_logits:  (T, num_classes) if return_aux else None
-        """
-        T     = len(x_a_scene)
-        enc   = self.utterance_encoder
-        len_a = torch.cat([len_a_scene[t] for t in range(T)], dim=0).to(device)
-        max_a = max(x_a_scene[t].shape[1] for t in range(T))
-        D_a   = x_a_scene[0].shape[2]
-
-        x_a_batch = torch.zeros(T, max_a, D_a, device=device, dtype=torch.float32)
-        for t in range(T):
-            fa = x_a_scene[t].squeeze(0).to(device)
-            x_a_batch[t, :fa.shape[0], :] = fa
-
-        # Frame-level audio mask
-        mask_a = torch.zeros(T, max_a, device=device, dtype=torch.bool)
-        for t in range(T):
-            if mask_scene[t].item() == 1:
-                mask_a[t, :x_a_scene[t].shape[1]] = True
-
-        # Conv + downsample
-        x_audio = enc.audio_conv(x_a_batch)           # (T, max_a//8, n_filters*4)
-        len_a   = len_a // 8
-        len_a[len_a == 0] = 1
-        a_max_len = x_audio.shape[1]
-
-        mask_a_reduced = enc.downsample_mask_or(mask_a, 8, a_max_len)
-        time           = torch.arange(a_max_len, device=device).unsqueeze(0)
-        valid_len      = time < len_a.unsqueeze(1)
-        mask_a_reduced = mask_a_reduced & valid_len
-        x_audio        = x_audio * mask_a_reduced.unsqueeze(-1).float()
-
-        if len_a[0] != 0:
-            packed  = pack_padded_sequence(
-                x_audio, len_a.cpu().numpy(),
-                batch_first=True, enforce_sorted=False
-            )
-        else:
-            packed = x_audio
-        x_audio, _ = enc.audio_rnn(packed)
-        if len_a[0] != 0:
-            x_audio, _ = pad_packed_sequence(x_audio, batch_first=True)
-
-        # fuse_att (shared with SERClassifier.forward fuse_base path)
-        a_len_this = x_audio.shape[1]
-        x_mm_input = torch.cat((x_audio, x_text), dim=1)
-        x_mm = enc.fuse_att(
-            x_mm_input, len_a, len_b, a_len_this,
-            mask_a=mask_a_reduced, mask_b=None
-        )
-        # x_mm: (T, d_hid * d_head)
-
-        embeddings = x_mm.unsqueeze(0)   # (1, T, utt_emb_dim)
-
-        aux_logits = None
-        if return_aux:
-            # Audio-only classification head: pools audio RNN output per utterance
-            # using the frame-level availability mask, then classifies.
-            # This loss term forces the audio encoder to maintain discriminative
-            # representations independently of the text stream.
-            enc = self.utterance_encoder
-            weights      = mask_a_reduced.unsqueeze(-1).float()      # (T, T_a, 1)
-            denom        = weights.sum(dim=1).clamp(min=1.0)         # (T, 1)
-            audio_pooled = (x_audio * weights).sum(dim=1) / denom   # (T, d_hid)
-            aux_logits   = enc.aux_head(audio_pooled)                # (T, num_classes)
-
-        return embeddings, aux_logits
-
-    def _scene_forward_from_embeddings(self, embeddings):
-        """GRU + classifier given pre-computed embeddings (1, T, utt_emb_dim)."""
-        embeddings = self.dropout(embeddings)
         scene_out, _ = self.scene_gru(embeddings)   # (1, T, d_hid)
         scene_out     = scene_out.squeeze(0)         # (T, d_hid)
         preds         = self.scene_classifier(scene_out)  # (T, num_classes)
+
         return preds, scene_out
-
-    def forward_two_pass(
-        self,
-        x_a_scene,
-        x_b_scene,
-        len_a_scene,
-        len_b_scene,
-        mask_scene,
-        device,
-    ):
-        """
-        Two-pass forward for training: stable + masked, with text computed once.
-
-        Text encoding (text_rnn) is identical in both passes since text is always
-        present. We run it once and share the result, then run audio conv+rnn
-        twice (stable mask and Markov mask) before fuse_att.
-
-        This saves roughly 30-40% of per-scene compute vs calling forward() twice.
-
-        Returns:
-            preds_stable: (T, num_classes)
-            preds_masked: (T, num_classes)
-        """
-        T = len(x_a_scene)
-
-        # Text once — shared across both passes
-        x_text, len_b, _ = self._build_text_batch(x_b_scene, len_b_scene, device)
-
-        # Stable pass: audio always present — compute aux logits here
-        ones_mask = torch.ones(T, device=device, dtype=torch.long)
-        emb_stable, aux_logits = self._audio_and_fuse(
-            x_a_scene, len_a_scene, ones_mask, x_text, len_b, device,
-            return_aux=True
-        )
-        preds_stable, _ = self._scene_forward_from_embeddings(emb_stable)
-
-        # Masked pass: Markov availability — no aux loss (audio may be absent)
-        emb_masked, _ = self._audio_and_fuse(
-            x_a_scene, len_a_scene, mask_scene, x_text, len_b, device,
-            return_aux=False
-        )
-        preds_masked, _ = self._scene_forward_from_embeddings(emb_masked)
-
-        return preds_stable, preds_masked, aux_logits
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -563,7 +364,7 @@ class Conv1dEncoder(nn.Module):
         self.relu    = nn.ReLU()
         self.pooling = nn.MaxPool1d(kernel_size=2, stride=2)
         self.dropout = nn.Dropout(dropout)
-        
+
     def forward(self, x: Tensor):
         x = x.float()
         x = x.permute(0, 2, 1)

@@ -335,11 +335,11 @@ if __name__ == '__main__':
         dm.get_label_dist(scenes, client_id)
 
         shuffle    = client_id not in ['dev', 'test']
-        # apply_mask=True for all splits: training uses forward_two_pass so the
-        # stable pass is generated internally; dev/test need Markov masks so that
-        # run_reintegration_eval can find reintegration events (mask[t-1]==0, mask[t]==1).
-        # server.inference() evaluates on the masked condition for UAR tracking,
-        # which gives the conservative (harder) estimate — appropriate as the main metric.
+        # apply_mask=True for all splits so that dev/test dataloaders carry Markov
+        # masks. Training ignores scene_mask (stable-only, Phase 1). Dev/test need
+        # the masks so run_reintegration_eval() can locate reintegration events
+        # (mask[t-1]==0, mask[t]==1) and run the stable vs masked contrast.
+        # server.inference() uses the stable condition for UAR tracking throughout.
         apply_mask = True
 
         dataloader_dict[client_id] = dm.set_scene_dataloader(
@@ -511,9 +511,18 @@ if __name__ == '__main__':
         # Performance save code
         save_result_dict[f'fold{fold_idx}'] = server.summarize_dict_results()
 
+        # Free the per-epoch result accumulator — it has served its purpose
+        # (best checkpoint already saved to disk by log_epoch_result).
+        # Holding all 200 rounds of train/dev/test result dicts in memory
+        # through the reintegration eval is unnecessary.
+        server.result_dict.clear()
+
         #------------------------------------------------------------------------------------------------
-        ## ADDED FOR REINTEGRATION EXPERIMENTS
-        # Reintegration eval: when using Markov availability, add windowed metrics to result
+        ## REINTEGRATION EVAL — Phase 1 primary result
+        # Runs once after FL training completes, on the best checkpoint
+        # (selected by dev UAR). The model was trained stable-only and has
+        # never seen audio absence. Any positive mean_delta at offset 0
+        # is the unmitigated reintegration cost.
         _reint_ok = (
             getattr(args, 'availability_process', None) == 'markov'
             and dataloader_dict is not None
@@ -529,10 +538,17 @@ if __name__ == '__main__':
         )
         if _reint_ok:
             try:
+                # Load best checkpoint before running reintegration eval
+                best_ckpt_path = server.result_path.joinpath('model.pt')
+                if best_ckpt_path.exists():
+                    server.global_model.load_state_dict(
+                        torch.load(str(best_ckpt_path), map_location=device)
+                    )
+                    logging.info("Reintegration eval: loaded best checkpoint from %s", best_ckpt_path)
+                else:
+                    logging.warning("Reintegration eval: no checkpoint found, using final model weights")
+
                 with torch.no_grad():
-                    # Reintegration eval uses server.run_reintegration_eval()
-                    # which performs the within-scene stable vs masked contrast
-                    # and reports mean_delta, n_reint_events, UAR per condition.
                     reint_dev  = server.run_reintegration_eval(dataloader_dict['dev'])
                     reint_test = server.run_reintegration_eval(dataloader_dict['test'])
                 save_result_dict[f'fold{fold_idx}']['reintegration_dev']  = reint_dev
