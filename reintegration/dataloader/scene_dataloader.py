@@ -124,6 +124,7 @@ class SceneDataset(Dataset):
             filename = utt[0]
             label    = utt[2]
 
+
             # Audio
             feat_a = self.audio_feat_dict.get(filename, None)
             if feat_a is not None:

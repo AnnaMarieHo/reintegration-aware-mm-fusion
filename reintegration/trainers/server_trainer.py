@@ -6,10 +6,12 @@ import copy, pdb, time, warnings, torch
 from pathlib import Path
 from copy import deepcopy
 from torch.utils.tensorboard import SummaryWriter
+from sklearn.metrics import recall_score, f1_score
 
 from my_extensions.reintegration.evaluation import EvalMetric
 
 import logging
+
 logging.basicConfig(
     format='%(asctime)s %(levelname)-3s ==> %(message)s',
     level=logging.INFO,
@@ -200,35 +202,56 @@ class Server(object):
         else:
             self.result = self.eval.multilabel_summary()
 
-    def run_reintegration_eval(self, dataloader):
+    def run_reintegration_eval(self, dataloader, recovery_window: int = 4):
         """
-        Per-timestep reintegration evaluation.
+        Per-timestep reintegration evaluation with post-reintegration recovery curve.
 
-        For each scene in the dataloader:
+        For each scene:
             - Run stable pass  (all-ones mask)
             - Run masked pass  (Markov mask from dataloader)
-            - Find reintegration events (mask[t-1]==0, mask[t]==1)
-            - Record delta = stable_correct[t] - masked_correct[t] at each t_reint
+            - Find reintegration events: mask[t-1]==0, mask[t]==1
+            - Record delta = stable_correct - masked_correct at offsets
+              0, 1, ..., recovery_window after each event boundary.
 
-        Returns:
-            dict with keys:
-                mean_delta        : float  — mean accuracy gap at reintegration
-                delta_per_event   : list   — per-event delta values
-                n_reint_events    : int    — total reintegration events observed
-                uar_stable        : float  — UAR under stable condition
-                uar_masked        : float  — UAR under masked condition
+        The recovery curve (delta_by_offset) shows whether the gap is localised
+        to the reintegration boundary (offset=0) or persists across subsequent
+        utterances. A decaying curve is evidence the effect is a genuine
+        boundary cost; a flat curve suggests persistent hidden-state divergence.
+
+        Offsets that fall outside the scene (t + offset >= T) or land inside
+        another absence run (mask[t+offset]==0) are skipped for that event, so
+        each offset bin only contains clean post-reintegration timesteps.
+
+        Args:
+            dataloader:       scene-level DataLoader (apply_mask=True)
+            recovery_window:  number of utterances after t_reint to track.
+                              Default 4 gives offsets [0, 1, 2, 3, 4].
+
+        Returns dict with keys:
+            mean_delta          : float        — mean delta at offset 0 (boundary)
+            delta_by_offset     : dict[int, list[float]]
+                                  offset → list of per-event delta values
+            mean_delta_by_offset: dict[int, float]
+                                  offset → mean delta (the recovery curve)
+            n_reint_events      : int          — reintegration events found
+            uar_stable          : float        — macro recall, stable condition (%)
+            uar_masked          : float        — macro recall, masked condition (%)
+            delta_uar           : float        — uar_stable - uar_masked
         """
         self.global_model.eval()
 
         all_preds_stable = []
         all_preds_masked = []
         all_labels       = []
-        delta_per_event  = []
         n_reint_events   = 0
+
+        # delta_by_offset[k] = list of (stable_correct - masked_correct) values
+        # collected at t_reint + k across all events
+        delta_by_offset = {k: [] for k in range(recovery_window + 1)}
 
         for batch_data in dataloader:
             if self.args.modality != "multimodal":
-                continue   # reintegration analysis is multimodal only
+                continue
 
             (scene_x_a, scene_x_b,
              scene_len_a, scene_len_b,
@@ -253,28 +276,34 @@ class Server(object):
                 scene_mask, self.device
             )
 
-            # Argmax predictions
             pred_s = preds_stable.argmax(dim=-1)   # (T,)
             pred_m = preds_masked.argmax(dim=-1)   # (T,)
             labels = scene_labels                  # (T,)
 
-            # Accumulate for global UAR
             all_preds_stable.extend(pred_s.cpu().tolist())
             all_preds_masked.extend(pred_m.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
-            # Find reintegration events: mask[t-1]==0, mask[t]==1
-            mask_np = scene_mask.cpu().numpy()
+            mask_np  = scene_mask.cpu().numpy()
+            pred_s_np = pred_s.cpu().numpy()
+            pred_m_np = pred_m.cpu().numpy()
+            labels_np = labels.cpu().numpy()
+
             for t in range(1, T):
                 if mask_np[t - 1] == 0 and mask_np[t] == 1:
-                    # reintegration event at utterance t
-                    correct_stable = int(pred_s[t].item() == labels[t].item())
-                    correct_masked = int(pred_m[t].item() == labels[t].item())
-                    delta = correct_stable - correct_masked
-                    delta_per_event.append(delta)
+                    # reintegration event at boundary t
                     n_reint_events += 1
 
-        # Compute UAR for both conditions
+                    for k in range(recovery_window + 1):
+                        t_k = t + k
+                        if t_k >= T:
+                            break   # ran off end of scene
+                        if k > 0 and mask_np[t_k] == 0:
+                            break   # hit another absence run — stop this event's window
+                        correct_s = int(pred_s_np[t_k] == labels_np[t_k])
+                        correct_m = int(pred_m_np[t_k] == labels_np[t_k])
+                        delta_by_offset[k].append(correct_s - correct_m)
+
         uar_stable = recall_score(
             all_labels, all_preds_stable, average='macro', zero_division=0
         ) * 100
@@ -282,22 +311,32 @@ class Server(object):
             all_labels, all_preds_masked, average='macro', zero_division=0
         ) * 100
 
-        mean_delta = float(np.mean(delta_per_event)) if delta_per_event else 0.0
-
-        result = {
-            'mean_delta':       mean_delta,
-            'delta_per_event':  delta_per_event,
-            'n_reint_events':   n_reint_events,
-            'uar_stable':       uar_stable,
-            'uar_masked':       uar_masked,
-            'delta_uar':        uar_stable - uar_masked,
+        mean_delta_by_offset = {
+            k: float(np.mean(v)) if v else float('nan')
+            for k, v in delta_by_offset.items()
         }
+        mean_delta = mean_delta_by_offset[0]
 
+        # Log the recovery curve
+        curve_str = ', '.join(
+            f'+{k}:{mean_delta_by_offset[k]:.4f} (n={len(delta_by_offset[k])})'
+            for k in range(recovery_window + 1)
+        )
         logging.info(
             f'Reintegration eval: n_events={n_reint_events}, '
-            f'mean_delta={mean_delta:.4f}, '
             f'UAR_stable={uar_stable:.2f}%, UAR_masked={uar_masked:.2f}%'
         )
+        logging.info(f'Recovery curve: {curve_str}')
+
+        result = {
+            'mean_delta':           mean_delta,
+            'delta_by_offset':      {k: v for k, v in delta_by_offset.items()},
+            'mean_delta_by_offset': mean_delta_by_offset,
+            'n_reint_events':       n_reint_events,
+            'uar_stable':           uar_stable,
+            'uar_masked':           uar_masked,
+            'delta_uar':            uar_stable - uar_masked,
+        }
         return result
 
     # ── Remaining methods unchanged from original ─────────────────────────

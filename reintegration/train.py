@@ -45,8 +45,6 @@ from my_extensions.reintegration.trainers.fed_avg_trainer import ClientFedAvg
 import sys
 from pathlib import Path
 
-# sys.path.append(str(Path(__file__).resolve().parents[4]))
-
 # define logging console
 import logging
 logging.basicConfig(
@@ -68,15 +66,13 @@ def parse_args():
     # read path config files
     path_conf = dict()
     with open(str(Path(os.path.realpath(__file__)).parents[0].joinpath('system.cfg'))) as f:
-    # with open(str(Path(os.path.realpath(__file__)).joinpath('system.cfg'))) as f:
         for line in f:
             key, val = line.strip().split('=')
             path_conf[key] = val.replace("\"", "")
 
     # If default setting
     if path_conf["data_dir"] == ".":
-        # path_conf["data_dir"] = str(Path(os.path.realpath(__file__)).parents[2].joinpath('data'))
-        path_conf["data_dir"] = str(Path(os.path.realpath(__file__)).parents[0].joinpath('feature'))
+        path_conf["data_dir"] = str(Path(os.path.realpath(__file__)).parents[0].joinpath('MELD.Raw'))
     if path_conf["output_dir"] == ".":
         path_conf["output_dir"] = str(Path(os.path.realpath(__file__)).parents[0].joinpath('output'))
 
@@ -547,12 +543,25 @@ if __name__ == '__main__':
                     reint_dev['mean_delta'], reint_dev['n_reint_events'],
                     reint_dev['uar_stable'], reint_dev['uar_masked']
                 )
+                dev_curve = reint_dev.get('mean_delta_by_offset', {})
+                if dev_curve:
+                    curve_str = ', '.join(
+                        f'+{k}:{v:.4f}' for k, v in sorted(dev_curve.items())
+                    )
+                    logging.info("Dev  recovery curve: %s", curve_str)
+
                 logging.info(
                     "Reintegration test: mean_delta=%.4f, n_events=%d, "
                     "UAR_stable=%.2f%%, UAR_masked=%.2f%%",
                     reint_test['mean_delta'], reint_test['n_reint_events'],
                     reint_test['uar_stable'], reint_test['uar_masked']
                 )
+                test_curve = reint_test.get('mean_delta_by_offset', {})
+                if test_curve:
+                    curve_str = ', '.join(
+                        f'+{k}:{v:.4f}' for k, v in sorted(test_curve.items())
+                    )
+                    logging.info("Test recovery curve: %s", curve_str)
             except Exception as e:
                 logging.exception("Reintegration eval failed: %s", e)
                 print("Reintegration eval FAILED:", e)
