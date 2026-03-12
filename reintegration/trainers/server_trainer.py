@@ -21,13 +21,13 @@ logging.basicConfig(
 
 class Server(object):
     def __init__(self, args, model, device, criterion, client_ids):
-        self.args        = args
-        self.device      = device
-        self.result_dict = dict()
+        self.args         = args
+        self.device       = device
+        self.result_dict  = dict()
         self.global_model = model
-        self.criterion   = criterion
-        self.client_ids  = client_ids
-        self.multilabel  = True if args.dataset == 'ptb-xl' else False
+        self.criterion    = criterion
+        self.client_ids   = client_ids
+        self.multilabel   = True if args.dataset == 'ptb-xl' else False
         self.model_setting_str = self.get_model_setting()
 
         if self.args.fed_alg == 'scaffold':
@@ -124,29 +124,33 @@ class Server(object):
         self.result_dict[self.epoch]['dev']   = list()
         self.result_dict[self.epoch]['test']  = list()
 
+        # Prune result_dict: keep only current epoch and best epoch.
+        # Without this, result_dict accumulates entries for all 200+ rounds,
+        # holding logit arrays and metric dicts in memory for the entire run.
+        keep = {self.epoch}
+        if hasattr(self, 'best_epoch'):
+            keep.add(self.best_epoch)
+        for old_epoch in list(self.result_dict.keys()):
+            if old_epoch not in keep:
+                del self.result_dict[old_epoch]
+
     def get_parameters(self):
         return self.global_model.state_dict()
 
     def get_model_result(self):
         return self.result
 
-    def inference(self, dataloader, condition: str = 'masked'):
+    def inference(self, dataloader):
         """
         Scene-level inference for dev/test evaluation.
 
-        Args:
-            dataloader: scene-level dataloader yielding
-                        (scene_x_a, scene_x_b, scene_len_a, scene_len_b,
-                         scene_labels, scene_mask)
-            condition:  'stable'  — evaluate with all-ones audio mask
-                        'masked'  — evaluate with Markov audio mask from dataloader
-                        'both'    — evaluate both and store per-timestep delta
-                                    (used for reintegration analysis)
+        Phase 1: always evaluates with the stable (all-ones) audio mask.
+        The model was trained on full audio; dev/test UAR is measured in
+        the same condition to track learning progress across FL rounds.
 
-        For standard FL evaluation (dev/test UAR), condition='masked' matches
-        the harder trained condition and gives a conservative performance estimate.
-        For reintegration analysis, condition='both' is used separately via
-        run_reintegration_eval().
+        The reintegration contrast is measured separately at the end of
+        training via run_reintegration_eval(), which runs both the stable
+        and masked passes on the test set using the best checkpoint.
         """
         self.global_model.eval()
         self.eval = EvalMetric(self.multilabel)
@@ -155,25 +159,20 @@ class Server(object):
             if self.args.modality == "multimodal":
                 (scene_x_a, scene_x_b,
                  scene_len_a, scene_len_b,
-                 scene_labels, scene_mask) = batch_data
+                 scene_labels, _) = batch_data   # scene_mask unused during inference
 
                 scene_labels = scene_labels.to(self.device)
-                scene_mask   = scene_mask.to(self.device)
-
                 T = scene_labels.shape[0]
 
-                if condition == 'stable':
-                    eval_mask = torch.ones(T, device=self.device, dtype=torch.long)
-                else:
-                    eval_mask = scene_mask   # Markov mask from dataloader
+                # Stable mask: audio always present, matches training condition
+                stable_mask = torch.ones(T, device=self.device, dtype=torch.long)
 
                 preds, _ = self.global_model(
                     scene_x_a, scene_x_b,
                     scene_len_a, scene_len_b,
-                    eval_mask,
+                    stable_mask,
                     self.device
                 )
-                # preds: (T, num_classes)
                 log_preds = torch.log_softmax(preds, dim=-1)
                 loss = self.criterion(log_preds, scene_labels)
 
@@ -204,38 +203,36 @@ class Server(object):
 
     def run_reintegration_eval(self, dataloader, recovery_window: int = 4):
         """
-        Per-timestep reintegration evaluation with post-reintegration recovery curve.
+        Per-timestep reintegration evaluation — the primary Phase 1 result.
 
-        For each scene:
-            - Run stable pass  (all-ones mask)
-            - Run masked pass  (Markov mask from dataloader)
-            - Find reintegration events: mask[t-1]==0, mask[t]==1
-            - Record delta = stable_correct - masked_correct at offsets
-              0, 1, ..., recovery_window after each event boundary.
+        Runs on the best checkpoint after FL training completes.
+        For each test scene, the model is forwarded twice:
+            - Stable pass  (all-ones mask): model in its trained condition
+            - Masked pass  (Markov mask):   audio absent then returns
 
-        The recovery curve (delta_by_offset) shows whether the gap is localised
-        to the reintegration boundary (offset=0) or persists across subsequent
-        utterances. A decaying curve is evidence the effect is a genuine
-        boundary cost; a flat curve suggests persistent hidden-state divergence.
+        Reintegration events are identified where mask[t-1]==0, mask[t]==1.
+        At each event boundary and for recovery_window utterances after it,
+        delta = stable_correct - masked_correct is recorded.
 
-        Offsets that fall outside the scene (t + offset >= T) or land inside
-        another absence run (mask[t+offset]==0) are skipped for that event, so
-        each offset bin only contains clean post-reintegration timesteps.
+        A positive mean_delta at offset 0 means the model makes more correct
+        predictions when audio was continuously present than when audio just
+        returned after an absence run — the reintegration phenomenon exists.
+
+        A decaying recovery curve (delta shrinks at offsets 1,2,3,4) means
+        the cost is localised to the boundary. A flat curve means the hidden
+        state divergence persists across subsequent utterances.
 
         Args:
-            dataloader:       scene-level DataLoader (apply_mask=True)
-            recovery_window:  number of utterances after t_reint to track.
-                              Default 4 gives offsets [0, 1, 2, 3, 4].
+            dataloader:      scene-level DataLoader (apply_mask=True)
+            recovery_window: utterances after t_reint to track (default 4)
 
         Returns dict with keys:
-            mean_delta          : float        — mean delta at offset 0 (boundary)
+            mean_delta          : float        — mean delta at offset 0
             delta_by_offset     : dict[int, list[float]]
-                                  offset → list of per-event delta values
-            mean_delta_by_offset: dict[int, float]
-                                  offset → mean delta (the recovery curve)
-            n_reint_events      : int          — reintegration events found
-            uar_stable          : float        — macro recall, stable condition (%)
-            uar_masked          : float        — macro recall, masked condition (%)
+            mean_delta_by_offset: dict[int, float] — the recovery curve
+            n_reint_events      : int
+            uar_stable          : float        — macro recall, stable (%)
+            uar_masked          : float        — macro recall, masked (%)
             delta_uar           : float        — uar_stable - uar_masked
         """
         self.global_model.eval()
@@ -244,10 +241,7 @@ class Server(object):
         all_preds_masked = []
         all_labels       = []
         n_reint_events   = 0
-
-        # delta_by_offset[k] = list of (stable_correct - masked_correct) values
-        # collected at t_reint + k across all events
-        delta_by_offset = {k: [] for k in range(recovery_window + 1)}
+        delta_by_offset  = {k: [] for k in range(recovery_window + 1)}
 
         for batch_data in dataloader:
             if self.args.modality != "multimodal":
@@ -261,45 +255,45 @@ class Server(object):
             scene_mask   = scene_mask.to(self.device)
             T = scene_labels.shape[0]
 
-            # Stable pass
+            # Stable pass — model in its trained condition
             ones_mask = torch.ones(T, device=self.device, dtype=torch.long)
-            preds_stable, _ = self.global_model(
-                scene_x_a, scene_x_b,
-                scene_len_a, scene_len_b,
-                ones_mask, self.device
-            )
+            with torch.no_grad():
+                preds_stable, _ = self.global_model(
+                    scene_x_a, scene_x_b,
+                    scene_len_a, scene_len_b,
+                    ones_mask, self.device
+                )
 
-            # Masked pass
-            preds_masked, _ = self.global_model(
-                scene_x_a, scene_x_b,
-                scene_len_a, scene_len_b,
-                scene_mask, self.device
-            )
+            # Masked pass — Markov audio availability
+            with torch.no_grad():
+                preds_masked, _ = self.global_model(
+                    scene_x_a, scene_x_b,
+                    scene_len_a, scene_len_b,
+                    scene_mask, self.device
+                )
 
-            pred_s = preds_stable.argmax(dim=-1)   # (T,)
-            pred_m = preds_masked.argmax(dim=-1)   # (T,)
-            labels = scene_labels                  # (T,)
+            pred_s    = preds_stable.argmax(dim=-1)   # (T,)
+            pred_m    = preds_masked.argmax(dim=-1)   # (T,)
+            labels    = scene_labels                  # (T,)
 
             all_preds_stable.extend(pred_s.cpu().tolist())
             all_preds_masked.extend(pred_m.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
-            mask_np  = scene_mask.cpu().numpy()
+            mask_np   = scene_mask.cpu().numpy()
             pred_s_np = pred_s.cpu().numpy()
             pred_m_np = pred_m.cpu().numpy()
             labels_np = labels.cpu().numpy()
 
             for t in range(1, T):
                 if mask_np[t - 1] == 0 and mask_np[t] == 1:
-                    # reintegration event at boundary t
                     n_reint_events += 1
-
                     for k in range(recovery_window + 1):
                         t_k = t + k
                         if t_k >= T:
-                            break   # ran off end of scene
+                            break
                         if k > 0 and mask_np[t_k] == 0:
-                            break   # hit another absence run — stop this event's window
+                            break   # another absence run — stop this event's window
                         correct_s = int(pred_s_np[t_k] == labels_np[t_k])
                         correct_m = int(pred_m_np[t_k] == labels_np[t_k])
                         delta_by_offset[k].append(correct_s - correct_m)
@@ -317,7 +311,6 @@ class Server(object):
         }
         mean_delta = mean_delta_by_offset[0]
 
-        # Log the recovery curve
         curve_str = ', '.join(
             f'+{k}:{mean_delta_by_offset[k]:.4f} (n={len(delta_by_offset[k])})'
             for k in range(recovery_window + 1)
@@ -328,7 +321,7 @@ class Server(object):
         )
         logging.info(f'Recovery curve: {curve_str}')
 
-        result = {
+        return {
             'mean_delta':           mean_delta,
             'delta_by_offset':      {k: v for k, v in delta_by_offset.items()},
             'mean_delta_by_offset': mean_delta_by_offset,
@@ -337,9 +330,8 @@ class Server(object):
             'uar_masked':           uar_masked,
             'delta_uar':            uar_stable - uar_masked,
         }
-        return result
 
-    # ── Remaining methods unchanged from original ─────────────────────────
+    # ── Remaining methods unchanged ───────────────────────────────────────
 
     def get_num_params(self):
         model_parameters = filter(lambda p: p.requires_grad, self.global_model.parameters())
@@ -367,11 +359,11 @@ class Server(object):
         elif metric == 'f1':
             logging.info(f'{data_split} set, Loss: {loss:.3f}, Macro-F1: {f1:.2f}%, Acc: {acc:.2f}%')
 
-        self.log_writer.add_scalar(f'Loss/{data_split}',    loss,     self.epoch)
-        self.log_writer.add_scalar(f'Acc/{data_split}',     acc,      self.epoch)
-        self.log_writer.add_scalar(f'UAR/{data_split}',     uar,      self.epoch)
-        self.log_writer.add_scalar(f'F1/{data_split}',      f1,       self.epoch)
-        self.log_writer.add_scalar(f'Top5_Acc/{data_split}',top5_acc, self.epoch)
+        self.log_writer.add_scalar(f'Loss/{data_split}',     loss,     self.epoch)
+        self.log_writer.add_scalar(f'Acc/{data_split}',      acc,      self.epoch)
+        self.log_writer.add_scalar(f'UAR/{data_split}',      uar,      self.epoch)
+        self.log_writer.add_scalar(f'F1/{data_split}',       f1,       self.epoch)
+        self.log_writer.add_scalar(f'Top5_Acc/{data_split}', top5_acc, self.epoch)
 
     def save_result(self, file_path):
         jsonString = json.dumps(self.result_dict, indent=4)
@@ -445,6 +437,13 @@ class Server(object):
 
         if self.args.fed_alg == 'scaffold':
             self.update_server_control()
+
+        # Free per-client state_dict copies immediately after aggregation.
+        # Holding them until initialize_epoch_updates doubles peak memory.
+        del w_avg
+        self.model_updates.clear()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def save_json_file(self, data_dict, data_path):
         jsonString = json.dumps(data_dict, indent=4)

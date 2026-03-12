@@ -9,37 +9,30 @@ from sklearn.metrics import recall_score
 from .optimizer import FedProxOptimizer
 
 warnings.filterwarnings('ignore')
-from .evaluation import EvalMetric
+from my_extensions.reintegration.evaluation import EvalMetric
 
 
 class ClientFedAvg(object):
     """
-    FedAvg client trainer modified for scene-level reintegration experiments.
+    FedAvg client trainer — Phase 1 (establish reintegration phenomenon).
 
-    Key changes from original:
-        1. update_weights processes scenes one at a time (scene loop).
-           Each scene is forwarded twice per iteration:
-               - stable pass  (all-ones audio mask)
-               - masked pass  (Markov audio availability mask)
-           Loss = loss_stable + loss_masked, backprop once.
-           This trains the model on both conditions without splitting the dataset.
+    Training is stable-only: audio is always present during training.
+    The model never sees audio absence, so it learns full (A,T) fusion
+    without any strategy for handling missingness.
 
-        2. Batch data contract changed:
-               scene_x_a      : list of T audio tensors
-               scene_x_b      : list of T text tensors
-               scene_len_a    : list of T length tensors
-               scene_len_b    : list of T length tensors
-               scene_labels   : (T,) label tensor
-               scene_mask     : (T,) int tensor — Markov audio availability mask
-                                1 = audio present, 0 = audio absent
+    At test time, run_reintegration_eval() presents the trained model with
+    scenes where audio is absent for a run then returns (Markov mask).
+    Any delta at t_reint is the unmitigated reintegration cost — the
+    phenomenon in its natural form, unaffected by robustness training.
 
-        3. Per-timestep predictions are flattened across all utterances in
-           the scene before being passed to EvalMetric, so training metrics
-           remain comparable to the original utterance-level evaluation.
-
-        4. SceneGRUWrapper.forward_two_pass() is called during training.
-           For inference (server.inference), forward() is called directly
-           with the appropriate mask.
+    Batch data contract (multimodal):
+        scene_x_a      : list of T audio tensors, each (1, T_frames, D_audio)
+        scene_x_b      : list of T text tensors,  each (1, T_tokens, D_text)
+        scene_len_a    : list of T length tensors, each (1,)
+        scene_len_b    : list of T length tensors, each (1,)
+        scene_labels   : (T,) label tensor
+        scene_mask     : (T,) int tensor — Markov mask (unused during training,
+                         present in batch because dataloader always yields it)
     """
 
     def __init__(
@@ -52,12 +45,12 @@ class ClientFedAvg(object):
         label_dict=None,
         num_class=None
     ):
-        self.args        = args
-        self.model       = model
-        self.device      = device
-        self.criterion   = criterion
-        self.dataloader  = dataloader
-        self.multilabel  = True if args.dataset == 'ptb-xl' else False
+        self.args       = args
+        self.model      = model
+        self.device     = device
+        self.criterion  = criterion
+        self.dataloader = dataloader
+        self.multilabel = True if args.dataset == 'ptb-xl' else False
 
     def get_parameters(self):
         return self.model.state_dict()
@@ -93,51 +86,31 @@ class ClientFedAvg(object):
 
                 if self.args.modality == "multimodal":
                     # ── Unpack scene-level batch ───────────────────────────
-                    # Dataloader yields one scene per iteration.
-                    # scene_x_a:   list[T] of (1, T_frames, D_audio)
-                    # scene_x_b:   list[T] of (1, T_tokens, D_text)
-                    # scene_len_a: list[T] of (1,)
-                    # scene_len_b: list[T] of (1,)
-                    # scene_labels:(T,)   — per-utterance labels
-                    # scene_mask:  (T,)   — per-utterance Markov audio mask
                     (scene_x_a, scene_x_b,
                      scene_len_a, scene_len_b,
-                     scene_labels, scene_mask) = batch_data
+                     scene_labels, _) = batch_data   # scene_mask unused in Phase 1
 
                     scene_labels = scene_labels.to(self.device)   # (T,)
-                    scene_mask   = scene_mask.to(self.device)     # (T,)
+                    T = scene_labels.shape[0]
 
-                    # ── Two-pass forward ──────────────────────────────────
-                    # Pass 1: stable (audio always present)
-                    # Pass 2: masked (Markov audio availability)
-                    # Both passes run on the SAME scene content.
-                    # No dataset splitting needed.
-                    preds_stable, preds_masked, aux_logits = self.model.forward_two_pass(
+                    # ── Stable-only forward pass ───────────────────────────
+                    # Audio always present: all-ones mask.
+                    # The model learns full (A,T) fusion exclusively.
+                    # No masked pass — the model must not learn any strategy
+                    # for handling absence, so the reintegration dip at test
+                    # time reflects the unmitigated phenomenon.
+                    stable_mask = torch.ones(T, device=self.device, dtype=torch.long)
+
+                    preds, _ = self.model(
                         scene_x_a, scene_x_b,
                         scene_len_a, scene_len_b,
-                        scene_mask,
+                        stable_mask,
                         self.device
                     )
-                    # preds_stable: (T, num_classes)
-                    # preds_masked: (T, num_classes)
-                    # aux_logits:   (T, num_classes) — audio-only head, stable pass
+                    # preds: (T, num_classes)
 
-                    # ── Loss ──────────────────────────────────────────────
-                    # NLLLoss expects log-probabilities
-                    log_stable = torch.log_softmax(preds_stable, dim=-1)  # (T, C)
-                    log_masked = torch.log_softmax(preds_masked, dim=-1)  # (T, C)
-
-                    loss_stable = self.criterion(log_stable, scene_labels)
-                    loss_masked = self.criterion(log_masked, scene_labels)
-
-                    # Auxiliary audio loss: forces the audio encoder to maintain
-                    # discriminative representations independently of text.
-                    # Applied to the stable pass only (audio always present).
-                    # Weight 0.1 keeps it secondary to the fusion loss.
-                    log_aux  = torch.log_softmax(aux_logits, dim=-1)      # (T, C)
-                    loss_aux = self.criterion(log_aux, scene_labels)
-
-                    loss = loss_stable + loss_masked + 0.1 * loss_aux
+                    log_preds = torch.log_softmax(preds, dim=-1)   # (T, C)
+                    loss = self.criterion(log_preds, scene_labels)
 
                 else:
                     # ── Unimodal path — unchanged ─────────────────────────
@@ -154,15 +127,10 @@ class ClientFedAvg(object):
                 optimizer.step()
 
                 # ── Metrics ───────────────────────────────────────────────
-                # Use the masked pass predictions for training metrics
-                # (more informative than stable since it reflects the harder task).
-                # Flatten per-timestep predictions for EvalMetric compatibility.
                 if self.args.modality == "multimodal":
                     if not self.multilabel:
                         self.eval.append_classification_results(
-                            scene_labels,
-                            log_masked,
-                            loss
+                            scene_labels, log_preds, loss
                         )
                 else:
                     if not self.multilabel:
