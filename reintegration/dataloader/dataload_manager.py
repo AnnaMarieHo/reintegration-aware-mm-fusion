@@ -205,7 +205,7 @@ class DataloadManager():
             self.get_image_feat_path()
             self.get_text_feat_path()
         # Initialize audio feature paths
-        if self.args.dataset in ['ucf101', 'mit10', 'mit51', 'mit101', 'meld', 'crema_d', "ego4d-ttm"]:
+        if self.args.dataset in ['ucf101', 'mit10', 'mit51', 'mit101', 'meld', 'iemocap', 'crema_d', "ego4d-ttm"]:
             self.get_audio_feat_path()
         
         #------------------------------------------------------------------------------------------------
@@ -272,7 +272,9 @@ class DataloadManager():
         :param fold_idx: fold index
         :return: None
         """
-        if self.args.dataset == "meld":
+        if self.args.dataset in ("meld", "iemocap"):
+            data_path = self.text_feat_path
+        else:
             data_path = self.text_feat_path
         self.client_ids = [id.split('.pkl')[0] for id in os.listdir(str(data_path))]
         self.client_ids.sort()
@@ -288,7 +290,9 @@ class DataloadManager():
         :param fold_idx: fold index
         :return: data_dict: [key, path, label, feature_array]
         """
-        if self.args.dataset == "meld":
+        if self.args.dataset in ("meld", "iemocap"):
+            data_path = self.audio_feat_path.joinpath(f'{client_id}.pkl')
+        else:
             data_path = self.audio_feat_path.joinpath(f'{client_id}.pkl')
         with open(str(data_path), "rb") as f: 
             data_dict = pickle.load(f)
@@ -307,10 +311,10 @@ class DataloadManager():
         :param fold_idx: fold index
         :return: data_dict: [key, path, label, feature_array]
         """
-        if self.args.dataset == "meld":
-            data_path = self.text_feat_path.joinpath(
-                f'{client_id}.pkl'
-            )
+        if self.args.dataset in ("meld", "iemocap"):
+            data_path = self.text_feat_path.joinpath(f'{client_id}.pkl')
+        else:
+            data_path = self.text_feat_path.joinpath(f'{client_id}.pkl')
         with open(str(data_path), "rb") as f: 
             data_dict = pickle.load(f)
         return data_dict

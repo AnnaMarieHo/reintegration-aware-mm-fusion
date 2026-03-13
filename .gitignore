@@ -3,3 +3,6 @@ MELD.Raw/
 venv/
 reintegration/output/feature/
 __pycache__/
+reintegration/output/raw_iemocap/
+reintegration/output/log/
+reintegration/IEMOCAP/
