@@ -3,6 +3,17 @@ Train temporal missingness model for the MELD dataset.
 Usage:
 
 python -m my_extensions.reintegration.train \
+  --dataset iemocap \
+  --data_dir /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output \
+  --modality multimodal \
+  --audio_feat mfcc --text_feat mobilebert \
+  --fed_alg fed_avg --availability_process markov \
+  --num_epochs 200 --local_epochs 1 --sample_rate 1.0 --batch_size 16 \
+  --hid_size 128 --learning_rate 0.01 --en_att --att_name fuse_base \
+  --eval_only \
+  --ckpt_path "/mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/log/fed_avg/iemocap/mfcc_mobilebert/fuse_base/hid128_le1_lr001_bs16_sr10_ep100/fold2/model.pt"
+
+python -m my_extensions.reintegration.train \
     --dataset meld \
     --modality multimodal \
     --audio_feat mfcc     
@@ -25,7 +36,7 @@ import numpy as np
 import torch.nn as nn
 import argparse, logging
 import torch.multiprocessing
-import copy, time, shutil, sys, os, pdb
+import copy, time, shutil, sys, os, pdb, gc
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 
@@ -289,6 +300,17 @@ def parse_args():
         default=None,
         help="Path to precomputed availability .pkl for markov; required when availability_process=markov.",
     )
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        default=None,
+        help="Path to model.pt for reintegration eval (e.g. best epoch 44). Overrides result_path/model.pt when set.",
+    )
+    parser.add_argument(
+        "--eval_only",
+        action="store_true",
+        help="Skip training; load checkpoint and run reintegration eval only (use with --ckpt_path).",
+    )
     #------------------------------------------------------------------------------------------------
     args = parser.parse_args()
     return args
@@ -353,11 +375,26 @@ if __name__ == '__main__':
             shuffle         = shuffle,
             apply_mask      = apply_mask,
         )
+        # All-zeros audio ablation: same test scenes with p_stay_absent=1.0 so audio
+        # never transitions to present. run_reintegration_eval gives preds_stable vs
+        # preds_masked (all-zeros) and delta_uar = uar_stable - uar_masked.
+        if client_id == 'test':
+            dataloader_dict['test_all_zeros_audio'] = dm.set_scene_dataloader(
+                scenes          = scenes,
+                audio_feat_dict = audio_feat_dict,
+                text_feat_dict  = text_feat_dict,
+                default_feat_shape_a = np.array([1000, constants.feature_len_dict["mfcc"]]),
+                default_feat_shape_b = np.array([10,   constants.feature_len_dict["mobilebert"]]),
+                p_stay_absent   = 1.0,
+                p_stay_present  = 0.75,
+                shuffle         = False,
+                apply_mask      = apply_mask,
+            )
         
     # pdb.set_trace()
     # We perform 5 fold experiments with 5 seeds
     # for fold_idx in range(1, 6):
-    for fold_idx in range(1, 2):
+    for fold_idx in range(1, 6):
         # number of clients
         client_ids = [client_id for client_id in dm.client_ids if client_id not in ['dev', 'test']]
         num_of_clients = len(client_ids)
@@ -423,8 +460,14 @@ if __name__ == '__main__':
         # set seeds again
         set_seed(8*fold_idx)
 
-        # Training steps
-        for epoch in range(int(args.num_epochs)):
+        if args.eval_only:
+            if not getattr(args, 'ckpt_path', None):
+                raise ValueError("--eval_only requires --ckpt_path (path to model.pt).")
+            server.result_path = Path(args.ckpt_path).parent
+            save_result_dict[f'fold{fold_idx}'] = {}
+
+        # Training steps (skipped when --eval_only)
+        for epoch in range(0 if args.eval_only else int(args.num_epochs)):
             # define list varibles that saves the weights, loss, num_sample, etc.
             server.initialize_epoch_updates(epoch)
             # 1. Local training, return weights in fed_avg, return gradients in fed_sgd
@@ -472,7 +515,10 @@ if __name__ == '__main__':
                         client.result
                     )
                 del client
-            
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
             # logging skip client
             logging.info(f'Client Round: {epoch}, Skip client {skip_client_ids}')
 
@@ -508,8 +554,15 @@ if __name__ == '__main__':
                 )
             logging.info('---------------------------------------------------------')
 
-        # Performance save code
-        save_result_dict[f'fold{fold_idx}'] = server.summarize_dict_results()
+        # Performance save code (skip when eval_only; already set to {} above)
+        if not args.eval_only:
+            save_result_dict[f'fold{fold_idx}'] = server.summarize_dict_results()
+
+        # Free the per-epoch result accumulator before reintegration eval.
+        server.result_dict.clear()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Free the per-epoch result accumulator — it has served its purpose
         # (best checkpoint already saved to disk by log_epoch_result).
@@ -539,7 +592,7 @@ if __name__ == '__main__':
         if _reint_ok:
             try:
                 # Load best checkpoint before running reintegration eval
-                best_ckpt_path = server.result_path.joinpath('model.pt')
+                best_ckpt_path = Path(args.ckpt_path) if getattr(args, 'ckpt_path', None) else server.result_path.joinpath('model.pt')
                 if best_ckpt_path.exists():
                     server.global_model.load_state_dict(
                         torch.load(str(best_ckpt_path), map_location=device)
@@ -551,8 +604,12 @@ if __name__ == '__main__':
                 with torch.no_grad():
                     reint_dev  = server.run_reintegration_eval(dataloader_dict['dev'])
                     reint_test = server.run_reintegration_eval(dataloader_dict['test'])
+                    reint_test_all_zeros = server.run_reintegration_eval(
+                        dataloader_dict['test_all_zeros_audio']
+                    )
                 save_result_dict[f'fold{fold_idx}']['reintegration_dev']  = reint_dev
                 save_result_dict[f'fold{fold_idx}']['reintegration_test'] = reint_test
+                save_result_dict[f'fold{fold_idx}']['reintegration_test_all_zeros_audio'] = reint_test_all_zeros
                 logging.info(
                     "Reintegration dev:  mean_delta=%.4f, n_events=%d, "
                     "UAR_stable=%.2f%%, UAR_masked=%.2f%%",
@@ -571,6 +628,13 @@ if __name__ == '__main__':
                     "UAR_stable=%.2f%%, UAR_masked=%.2f%%",
                     reint_test['mean_delta'], reint_test['n_reint_events'],
                     reint_test['uar_stable'], reint_test['uar_masked']
+                )
+                logging.info(
+                    "Reintegration test (all-zeros audio ablation): n_events=%d, "
+                    "UAR_stable=%.2f%%, UAR_masked=%.2f%%, delta_uar=%.2f%%",
+                    reint_test_all_zeros['n_reint_events'],
+                    reint_test_all_zeros['uar_stable'], reint_test_all_zeros['uar_masked'],
+                    reint_test_all_zeros['delta_uar']
                 )
                 test_curve = reint_test.get('mean_delta_by_offset', {})
                 if test_curve:

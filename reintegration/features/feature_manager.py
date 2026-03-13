@@ -230,7 +230,7 @@ class FeatureManager():
                 self.args.dataset, 
                 f'partition_alpha{alpha_str}.{file_ext}'
             )
-        elif self.args.dataset in ["meld", "ptb-xl"]:
+        elif self.args.dataset in ["meld", "iemocap", "ptb-xl"]:
             partition_path = Path(self.args.output_dir).joinpath(
                 "partition", 
                 self.args.dataset, 

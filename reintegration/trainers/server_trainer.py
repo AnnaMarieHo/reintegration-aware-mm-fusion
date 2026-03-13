@@ -70,7 +70,7 @@ class Server(object):
 
     def get_model_setting(self):
         model_setting_str = ""
-        if self.args.dataset in ['meld']:
+        if self.args.dataset in ['meld', 'iemocap']:
             if self.args.modality == "multimodal":
                 self.feature = f'{self.args.audio_feat}_{self.args.text_feat}'
             elif self.args.modality == "audio":
@@ -123,6 +123,14 @@ class Server(object):
         self.result_dict[self.epoch]['train'] = list()
         self.result_dict[self.epoch]['dev']   = list()
         self.result_dict[self.epoch]['test']  = list()
+
+        # Prune result_dict to current + best epoch only.
+        keep = {self.epoch}
+        if hasattr(self, 'best_epoch'):
+            keep.add(self.best_epoch)
+        for old_epoch in list(self.result_dict.keys()):
+            if old_epoch not in keep:
+                del self.result_dict[old_epoch]
 
         # Prune result_dict: keep only current epoch and best epoch.
         # Without this, result_dict accumulates entries for all 200+ rounds,
@@ -371,7 +379,10 @@ class Server(object):
             f.write(jsonString)
 
     def save_train_updates(self, model_updates, num_sample, result, delta_control=None):
-        self.model_updates.append(model_updates)
+        # Move state dict tensors to CPU before storing — keeps GPU memory free
+        # between client training and aggregation.
+        cpu_updates = {k: v.cpu() for k, v in model_updates.items()}
+        self.model_updates.append(cpu_updates)
         self.num_samples_list.append(num_sample)
         self.result_dict[self.epoch]['train'].append(result)
         self.delta_controls.append(delta_control)
@@ -412,6 +423,8 @@ class Server(object):
         if len(self.num_samples_list) == 0:
             return
         total_num_samples = np.sum(self.num_samples_list)
+        # model_updates are on CPU (offloaded in save_train_updates).
+        # Aggregate on CPU, then load into model (which moves to device).
         w_avg = copy.deepcopy(self.model_updates[0])
 
         for key in w_avg.keys():
