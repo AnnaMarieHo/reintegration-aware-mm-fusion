@@ -47,7 +47,7 @@ python -m reintegration.train \
     --audio_feat mfcc \
     --text_feat mobilebert \
     --fed_alg fed_avg \
-    --num_epochs 200 \
+    --num_epochs 60 \
     --local_epochs 1 \
     --sample_rate 1.0 \
     --batch_size 16 \
