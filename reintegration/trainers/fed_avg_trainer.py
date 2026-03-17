@@ -84,7 +84,7 @@ class ClientFedAvg(object):
                 self.model.zero_grad()
                 optimizer.zero_grad()
 
-                if self.args.modality == "multimodal":
+                if self.args.modality in ["multimodal", "audio_only"]:
                     # ── Unpack scene-level batch ───────────────────────────
                     (scene_x_a, scene_x_b,
                      scene_len_a, scene_len_b,
@@ -127,7 +127,7 @@ class ClientFedAvg(object):
                 optimizer.step()
 
                 # ── Metrics ───────────────────────────────────────────────
-                if self.args.modality == "multimodal":
+                if self.args.modality in ["multimodal", "audio_only"]:
                     if not self.multilabel:
                         self.eval.append_classification_results(
                             scene_labels, log_preds, loss
