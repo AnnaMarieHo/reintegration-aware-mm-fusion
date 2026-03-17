@@ -55,4 +55,6 @@ python -m reintegration.train \
     --learning_rate 0.01 \
     --en_att \
     --att_name fuse_base \
-    --availability_process markov
+    --availability_process markov \
+    --modality audio_only
+
