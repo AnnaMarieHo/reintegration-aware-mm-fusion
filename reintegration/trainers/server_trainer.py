@@ -73,7 +73,7 @@ class Server(object):
         if self.args.dataset in ['meld', 'iemocap']:
             if self.args.modality == "multimodal":
                 self.feature = f'{self.args.audio_feat}_{self.args.text_feat}'
-            elif self.args.modality == "audio":
+            elif self.args.modality in ["audio", "audio_only"]:
                 self.feature = f'{self.args.audio_feat}'
             elif self.args.modality == "text":
                 self.feature = f'{self.args.text_feat}'
@@ -164,7 +164,7 @@ class Server(object):
         self.eval = EvalMetric(self.multilabel)
 
         for batch_idx, batch_data in enumerate(dataloader):
-            if self.args.modality == "multimodal":
+            if self.args.modality in ["multimodal", "audio_only"]:
                 (scene_x_a, scene_x_b,
                  scene_len_a, scene_len_b,
                  scene_labels, _) = batch_data   # scene_mask unused during inference
@@ -252,7 +252,7 @@ class Server(object):
         delta_by_offset  = {k: [] for k in range(recovery_window + 1)}
 
         for batch_data in dataloader:
-            if self.args.modality != "multimodal":
+            if self.args.modality not in ["multimodal", "audio_only"]:
                 continue
 
             (scene_x_a, scene_x_b,
