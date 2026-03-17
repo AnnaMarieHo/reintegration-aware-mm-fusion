@@ -6,3 +6,4 @@ __pycache__/
 reintegration/output/raw_iemocap/
 reintegration/output/log/
 reintegration/IEMOCAP/
+env/

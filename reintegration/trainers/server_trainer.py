@@ -8,7 +8,7 @@ from copy import deepcopy
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import recall_score, f1_score
 
-from my_extensions.reintegration.evaluation import EvalMetric
+from reintegration.evaluation import EvalMetric
 
 import logging
 

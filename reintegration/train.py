@@ -2,7 +2,7 @@
 Train temporal missingness model for the MELD dataset.
 Usage:
 
-python -m my_extensions.reintegration.train \
+python -m reintegration.train \
   --dataset iemocap \
   --data_dir /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output \
   --modality multimodal \
@@ -44,13 +44,13 @@ from tqdm import tqdm
 from pathlib import Path
 
 
-from my_extensions.reintegration.constants import constants
-from my_extensions.reintegration.trainers.server_trainer import Server
-from my_extensions.reintegration.model.mm_models import SERClassifier, SceneGRUWrapper
-from my_extensions.reintegration.dataloader.dataload_manager import DataloadManager
+from reintegration.constants import constants
+from reintegration.trainers.server_trainer import Server
+from reintegration.model.mm_models import SERClassifier, SceneGRUWrapper
+from reintegration.dataloader.dataload_manager import DataloadManager
 
 # from my_extensions.reintegration.trainers.fed_rs_trainer import ClientFedRS
-from my_extensions.reintegration.trainers.fed_avg_trainer import ClientFedAvg
+from reintegration.trainers.fed_avg_trainer import ClientFedAvg
 # from my_extensions.reintegration.trainers.scaffold_trainer import ClientScaffold
 
 import sys

@@ -9,7 +9,7 @@ from sklearn.metrics import recall_score
 from .optimizer import FedProxOptimizer
 
 warnings.filterwarnings('ignore')
-from my_extensions.reintegration.evaluation import EvalMetric
+from reintegration.evaluation import EvalMetric
 
 
 class ClientFedAvg(object):
