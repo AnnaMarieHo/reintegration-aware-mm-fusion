@@ -349,7 +349,12 @@ if __name__ == '__main__':
 
     for client_id in tqdm(dm.client_ids):
         audio_feat_dict = dm.load_audio_feat(client_id=client_id)
-        text_feat_dict  = dm.load_text_feat(client_id=client_id)
+        # When running audio-only sanity checks, skip real text features and
+        # pass an empty dict; the scene dataloader will synthesize zero text.
+        if args.modality == 'audio_only':
+            text_feat_dict = {}
+        else:
+            text_feat_dict  = dm.load_text_feat(client_id=client_id)
 
         # scenes for this client/split from partition (nested: scenes → utterances)
         scenes = partition[str(client_id)]
@@ -407,14 +412,27 @@ if __name__ == '__main__':
         # SceneGRUWrapper: cross-utterance GRU wrapper
         # The scene GRU hidden state carries absence history across utterances,
         # which is the mechanism through which reintegration effects manifest.
-        utterance_encoder = SERClassifier(
-            num_classes=constants.num_class_dict[args.dataset],
-            audio_input_dim=constants.feature_len_dict[args.audio_feat],
-            text_input_dim=constants.feature_len_dict[args.text_feat],
-            d_hid=args.hid_size,
-            en_att=args.att,
-            att_name=args.att_name,
-        )
+        # Multimodal vs audio-only configuration. For audio-only sanity checks,
+        # we keep the same classifier head size but feed zeros in place of
+        # text embeddings inside SERClassifier.
+        if args.modality == 'audio_only':
+            utterance_encoder = SERClassifier(
+                num_classes=constants.num_class_dict[args.dataset],
+                audio_input_dim=constants.feature_len_dict[args.audio_feat],
+                text_input_dim=0,
+                d_hid=args.hid_size,
+                en_att=args.att,
+                att_name=args.att_name,
+            )
+        else:
+            utterance_encoder = SERClassifier(
+                num_classes=constants.num_class_dict[args.dataset],
+                audio_input_dim=constants.feature_len_dict[args.audio_feat],
+                text_input_dim=constants.feature_len_dict[args.text_feat],
+                d_hid=args.hid_size,
+                en_att=args.att,
+                att_name=args.att_name,
+            )
         global_model = SceneGRUWrapper(
             utterance_encoder=utterance_encoder,
             num_classes=constants.num_class_dict[args.dataset],

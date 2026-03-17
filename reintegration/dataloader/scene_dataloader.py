@@ -88,6 +88,9 @@ class SceneDataset(Dataset):
     ):
         self.scenes          = scenes
         self.audio_feat_dict = audio_feat_dict
+        # text_feat_dict may be None or empty when running audio-only sanity
+        # checks; in that case we will synthesize zero text features in
+        # __getitem__.
         self.text_feat_dict  = text_feat_dict
         self.default_shape_a = tuple(default_shape_a)
         self.default_shape_b = tuple(default_shape_b)
@@ -152,13 +155,16 @@ class SceneDataset(Dataset):
             #     l_a = 0
 
             # Text
-            feat_b = self.text_feat_dict.get(filename, None)
+            feat_b = None
+            if self.text_feat_dict is not None and len(self.text_feat_dict) > 0:
+                feat_b = self.text_feat_dict.get(filename, None)
             if feat_b is not None:
                 if feat_b.ndim == 3:
                     feat_b = feat_b[0]
                 x_b = torch.tensor(feat_b, dtype=torch.float32)
                 l_b = x_b.shape[0]
             else:
+                # Audio-only runs: synthesize zero text features and zero length.
                 x_b = torch.zeros(self.default_shape_b, dtype=torch.float32)
                 l_b = 0
 

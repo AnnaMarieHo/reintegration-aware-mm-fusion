@@ -180,12 +180,21 @@ class SERClassifier(nn.Module):
                 )
         else:
             x_audio = torch.mean(x_audio, axis=1)
-            x_text  = torch.mean(x_text,  axis=1)
+            # Audio-only compatibility: when there is no valid text (len_t==0),
+            # replace text branch with zeros so the classifier input size stays
+            # consistent but predictions are driven purely by audio.
+            if len_t[0] != 0:
+                x_text = torch.mean(x_text, axis=1)
+            else:
+                x_text = torch.zeros_like(x_audio)
             x_mm    = torch.cat((x_audio, x_text), dim=1)
 
         if self.en_att and self.att_name != "fuse_base":
             x_audio = self.audio_proj(x_audio)
-            x_text  = self.text_proj(x_text)
+            if len_t[0] != 0:
+                x_text  = self.text_proj(x_text)
+            else:
+                x_text  = torch.zeros_like(x_audio)
             x_mm    = torch.cat((x_audio, x_text), dim=1)
 
         preds = self.classifier(x_mm)
