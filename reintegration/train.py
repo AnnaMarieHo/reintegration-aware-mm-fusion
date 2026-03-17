@@ -412,27 +412,17 @@ if __name__ == '__main__':
         # SceneGRUWrapper: cross-utterance GRU wrapper
         # The scene GRU hidden state carries absence history across utterances,
         # which is the mechanism through which reintegration effects manifest.
-        # Multimodal vs audio-only configuration. For audio-only sanity checks,
-        # we keep the same classifier head size but feed zeros in place of
-        # text embeddings inside SERClassifier.
-        if args.modality == 'audio_only':
-            utterance_encoder = SERClassifier(
-                num_classes=constants.num_class_dict[args.dataset],
-                audio_input_dim=constants.feature_len_dict[args.audio_feat],
-                text_input_dim=0,
-                d_hid=args.hid_size,
-                en_att=args.att,
-                att_name=args.att_name,
-            )
-        else:
-            utterance_encoder = SERClassifier(
-                num_classes=constants.num_class_dict[args.dataset],
-                audio_input_dim=constants.feature_len_dict[args.audio_feat],
-                text_input_dim=constants.feature_len_dict[args.text_feat],
-                d_hid=args.hid_size,
-                en_att=args.att,
-                att_name=args.att_name,
-            )
+        # Utterance encoder. For audio-only sanity checks we still construct the
+        # same multimodal architecture (including the text branch) but the
+        # dataloader feeds zero text features, so there is no text anchor.
+        utterance_encoder = SERClassifier(
+            num_classes=constants.num_class_dict[args.dataset],
+            audio_input_dim=constants.feature_len_dict[args.audio_feat],
+            text_input_dim=constants.feature_len_dict[args.text_feat],
+            d_hid=args.hid_size,
+            en_att=args.att,
+            att_name=args.att_name,
+        )
         global_model = SceneGRUWrapper(
             utterance_encoder=utterance_encoder,
             num_classes=constants.num_class_dict[args.dataset],
