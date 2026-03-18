@@ -82,12 +82,6 @@ class ClientFedAvg(object):
         for iter in range(int(self.args.local_epochs)):
             for batch_idx, batch_data in enumerate(self.dataloader):
 
-                if batch_idx == 0 and iter == 0:
-                    logging.info(f"scene_labels sample: {scene_labels[:10]}")
-                    logging.info(f"scene_labels min={scene_labels.min()}, max={scene_labels.max()}")
-                    logging.info(f"num_classes={constants.num_class_dict[self.args.dataset]}")
-                    logging.info(f"preds shape={preds.shape}, labels shape={scene_labels.shape}")
-
                 self.model.zero_grad()
                 optimizer.zero_grad()
 
