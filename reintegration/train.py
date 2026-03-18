@@ -13,7 +13,7 @@ python -m reintegration.train \
   --eval_only \
   --ckpt_path "/mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/log/fed_avg/iemocap/mfcc_mobilebert/fuse_base/hid128_le1_lr001_bs16_sr10_ep100/fold2/model.pt"
 
-python -m reintegration.train \
+python -m my_extensions.reintegration.train \
     --dataset meld \
     --modality multimodal \
     --audio_feat mfcc     
@@ -49,9 +49,9 @@ from reintegration.trainers.server_trainer import Server
 from reintegration.model.mm_models import SERClassifier, SceneGRUWrapper
 from reintegration.dataloader.dataload_manager import DataloadManager
 
-# from reintegration.trainers.fed_rs_trainer import ClientFedRS
+# from my_extensions.reintegration.trainers.fed_rs_trainer import ClientFedRS
 from reintegration.trainers.fed_avg_trainer import ClientFedAvg
-# from reintegration.trainers.scaffold_trainer import ClientScaffold
+# from my_extensions.reintegration.trainers.scaffold_trainer import ClientScaffold
 
 import sys
 from pathlib import Path
@@ -351,7 +351,7 @@ if __name__ == '__main__':
         audio_feat_dict = dm.load_audio_feat(client_id=client_id)
         text_feat_dict  = dm.load_text_feat(client_id=client_id)
 
-        # scenes for this client/split from partition (nested: scenes ΓåÆ utterances)
+        # scenes for this client/split from partition (nested: scenes → utterances)
         scenes = partition[str(client_id)]
 
         dm.get_label_dist(scenes, client_id)
@@ -414,6 +414,7 @@ if __name__ == '__main__':
             d_hid=args.hid_size,
             en_att=args.att,
             att_name=args.att_name,
+            audio_only=True,
         )
         global_model = SceneGRUWrapper(
             utterance_encoder=utterance_encoder,
@@ -564,14 +565,14 @@ if __name__ == '__main__':
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # Free the per-epoch result accumulator ΓÇö it has served its purpose
+        # Free the per-epoch result accumulator — it has served its purpose
         # (best checkpoint already saved to disk by log_epoch_result).
         # Holding all 200 rounds of train/dev/test result dicts in memory
         # through the reintegration eval is unnecessary.
         server.result_dict.clear()
 
         #------------------------------------------------------------------------------------------------
-        ## REINTEGRATION EVAL ΓÇö Phase 1 primary result
+        ## REINTEGRATION EVAL — Phase 1 primary result
         # Runs once after FL training completes, on the best checkpoint
         # (selected by dev UAR). The model was trained stable-only and has
         # never seen audio absence. Any positive mean_delta at offset 0
