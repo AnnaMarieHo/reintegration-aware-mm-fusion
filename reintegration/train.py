@@ -343,8 +343,18 @@ if __name__ == '__main__':
     with open(str(partition_path)) as f:
         partition = json.load(f)
 
-    # load client ids
+    # load client ids from feature directory (original behavior)
     dm.get_client_ids()
+    # Align client ids with partition.json keys to avoid KeyError when some
+    # feature files exist without a corresponding entry in the partition, or
+    # vice versa. We take the IDs defined in partition.json as authoritative.
+    partition_client_ids = [k for k in partition.keys()]
+    # Keep numeric client IDs sorted, with 'dev' and 'test' appended at the end
+    numeric_ids = sorted(
+        [cid for cid in partition_client_ids if cid not in ['dev', 'test']],
+        key=lambda x: int(x)
+    )
+    dm.client_ids = numeric_ids + [cid for cid in ['dev', 'test'] if cid in partition_client_ids]
     # set dataloaders
     dataloader_dict = dict()
     logging.info('Reading Data')
@@ -702,5 +712,5 @@ if __name__ == '__main__':
     # dump the dictionary
     server.save_json_file(
         save_result_dict, 
-        save_json_path.joinpath('result.json')
+        save_json_path.joinpath('result.json') 
     )
