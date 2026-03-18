@@ -56,5 +56,4 @@ python -m reintegration.train \
     --en_att \
     --att_name fuse_base \
     --availability_process markov \
-    --modality audio_only
 
