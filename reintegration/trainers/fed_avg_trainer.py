@@ -1,6 +1,8 @@
 import collections
 import numpy as np
 import copy, pdb, time, warnings, torch
+import logging
+
 
 from torch import nn
 from torch.utils.data import DataLoader
@@ -10,7 +12,6 @@ from .optimizer import FedProxOptimizer
 
 warnings.filterwarnings('ignore')
 from reintegration.evaluation import EvalMetric
-
 
 class ClientFedAvg(object):
     """
