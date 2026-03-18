@@ -144,6 +144,8 @@ class SERClassifier(nn.Module):
                 x_audio, len_a.cpu().numpy(), batch_first=True, enforce_sorted=False
             )
         if len_t[0] != 0:
+            len_t = len_t.clone()
+            len_t[len_t == 0] = 1
             x_text = pack_padded_sequence(
                 x_text, len_t.cpu().numpy(), batch_first=True, enforce_sorted=False
             )
