@@ -95,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--train_clients",
         type=int,
-        default=5,
+        default=10,
         help="Number of FL train clients (default 5).",
     )
     parser.add_argument(

@@ -125,6 +125,11 @@ class SERClassifier(nn.Module):
 
         len_a = len_a // 8
         len_a[len_a == 0] = 1
+        # Text lengths can be zero for audio-only runs or missing text;
+        # pack_padded_sequence, however, requires all lengths > 0.
+        # Clamp zero lengths to 1 so that packing succeeds while the
+        # corresponding positions remain all-zeros and thus inert.
+        len_t[len_t == 0] = 1
         a_max_len = x_audio.shape[1]
 
         mask_a_reduced = None
