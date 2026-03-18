@@ -20,7 +20,8 @@ num_class_dict = {
     'mit10':                10, 
     'mit51':                51, 
     'meld':                 7,
-    'iemocap':              6,   # angry, happy, sad, neutral, excited, frustrated (map HF emotion to these)
+    # 'iemocap':              6,   # angry, happy, sad, neutral, excited, frustrated (map HF emotion to these)
+    'iemocap':              4,   # angry, happy, sad, neutral, excited, frustrated (map HF emotion to these)
     'crema_d':              4,
     'uci-har':              6,
     'ptb-xl':               5,

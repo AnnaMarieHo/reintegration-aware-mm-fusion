@@ -37,13 +37,22 @@ import numpy as np
 import pandas as pd
 
 
+# IEMOCAP_LABEL_MAP = {
+#     "angry": 0,
+#     "happy": 1,
+#     "sad": 2,
+#     "neutral": 3,
+#     "excited": 4,
+#     "frustrated": 5,
+# }
+
 IEMOCAP_LABEL_MAP = {
-    "angry": 0,
-    "happy": 1,
-    "sad": 2,
-    "neutral": 3,
-    "excited": 4,
-    "frustrated": 5,
+    "angry":      0,
+    "frustrated": 0,
+    "happy":      1,
+    "excited":    1,
+    "sad":        2,
+    "neutral":    3,
 }
 
 IEMOCAP_LABEL_ALIASES = {
