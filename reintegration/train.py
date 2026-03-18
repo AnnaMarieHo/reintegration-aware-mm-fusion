@@ -414,7 +414,7 @@ if __name__ == '__main__':
             d_hid=args.hid_size,
             en_att=args.att,
             att_name=args.att_name,
-            audio_only=True,
+            audio_only=False,
         )
         global_model = SceneGRUWrapper(
             utterance_encoder=utterance_encoder,
