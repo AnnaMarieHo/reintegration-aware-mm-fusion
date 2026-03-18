@@ -129,6 +129,12 @@ class SERClassifier(nn.Module):
         len_a[len_a == 0] = 1
         a_max_len = x_audio.shape[1]
 
+        # Guard against zero-length text sequences (e.g. audio_only mode where
+        # text features are synthetic zeros, or short utterances from newly
+        # shuffled partition scenes that were previously unreachable).
+        len_t = len_t.clone()
+        len_t[len_t == 0] = 1
+
         mask_a_reduced = None
         if mask_a is not None:
             mask_a_reduced = self.downsample_mask_or(mask_a, 8, a_max_len)
