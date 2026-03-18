@@ -20,15 +20,17 @@ Output:
 
 Usage:
 
-  python -m my_extensions.reintegration.scripts.repartition_iemocap_from_parquet \\
+  python -m my_extensions.reintegration.scripts.repartition_iemocap \\
     --parquet_dir  /path/to/iemocap_parquet \\
     --wav_root     /path/to/raw_iemocap \\
     --output_dir   /path/to/reintegration/output \\
-    --scene_size   15
+    --scene_size   25
 """
 
 import argparse
 import json
+import random
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -200,6 +202,7 @@ def main() -> None:
 
     # Build a global, ordered scene list where each scene is contained
     # within a single interaction (no cross-boundary scenes).
+
     all_scenes = []
     for inter in interactions:
         all_scenes.extend(make_scenes_for_interaction(by_interaction[inter]))
@@ -207,21 +210,53 @@ def main() -> None:
     if not all_scenes:
         raise RuntimeError("No scenes could be formed from interactions.")
 
-    # Deterministic train/dev/test split at the scene level, preserving
-    # interaction order and never splitting a scene.
-    n_scenes = len(all_scenes)
-    n_dev_scenes = int(n_scenes * args.dev_frac)
-    n_test_scenes = int(n_scenes * args.test_frac)
-    n_train_scenes = n_scenes - n_dev_scenes - n_test_scenes
+    # Shuffle scenes at scene level (not utterance level) so dev/test are
+    # drawn from all sessions rather than always being the last sessions.
+    # Seed is fixed for reproducibility.
+    rng = np.random.default_rng(42)
+    all_scenes = list(all_scenes)
+    all_scenes = [s for s in all_scenes if len(s) >= 3] # remove scenes with less than 3 utterances
 
-    train_scenes = all_scenes[:n_train_scenes]
-    dev_scenes = all_scenes[n_train_scenes : n_train_scenes + n_dev_scenes]
-    test_scenes = all_scenes[n_train_scenes + n_dev_scenes :]
+    rng.shuffle(all_scenes)
 
-    # Assign train scenes to clients without shuffling (round-robin by scene index)
+    # Stratified train/dev/test split: sample dev and test scenes uniformly
+    # across dominant labels so all splits see the full label distribution.
+    def dominant_label(scene):
+        labels = [utt[2] for utt in scene]
+        return Counter(labels).most_common(1)[0][0]
+
+    # Group scene indices by dominant label
+    label_to_indices = {}
+    for idx, scene in enumerate(all_scenes):
+        lbl = dominant_label(scene)
+        label_to_indices.setdefault(lbl, []).append(idx)
+
+    dev_indices, test_indices = set(), set()
+    for lbl, indices in label_to_indices.items():
+        n_dev  = max(1, int(len(indices) * args.dev_frac))
+        n_test = max(1, int(len(indices) * args.test_frac))
+        dev_indices.update(indices[:n_dev])
+        test_indices.update(indices[n_dev:n_dev + n_test])
+
+    train_scenes = [s for i, s in enumerate(all_scenes)
+                    if i not in dev_indices and i not in test_indices]
+    dev_scenes   = [all_scenes[i] for i in sorted(dev_indices)]
+    test_scenes  = [all_scenes[i] for i in sorted(test_indices)]
+
+    # Stratified client assignment: distribute scenes evenly by dominant label
+    # so each client sees a representative label mix. This replaces the old
+    # round-robin which gave systematically skewed clients due to interaction ordering.
+    label_queues = {}
+    for scene in train_scenes:
+        lbl = dominant_label(scene)
+        label_queues.setdefault(lbl, []).append(scene)
+
     client_scenes = [[] for _ in range(args.train_clients)]
-    for k, scene in enumerate(train_scenes):
-        client_scenes[k % args.train_clients].append(scene)
+    client_idx = 0
+    for lbl in sorted(label_queues):
+        for scene in label_queues[lbl]:
+            client_scenes[client_idx % args.train_clients].append(scene)
+            client_idx += 1
 
     partition = {}
     for c in range(args.train_clients):
@@ -246,4 +281,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

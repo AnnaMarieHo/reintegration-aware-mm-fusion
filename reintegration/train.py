@@ -73,6 +73,8 @@ def set_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
 
+
+
 def parse_args():
     # read path config files
     path_conf = dict()
@@ -405,8 +407,33 @@ if __name__ == '__main__':
         num_of_clients = len(client_ids)
         # set seeds
         set_seed(8*fold_idx)
-        # loss function
-        criterion = nn.NLLLoss().to(device)
+
+        # ---------------------------------------------------------------------
+        # Class-balanced loss: inverse-frequency weights over training clients
+        # ---------------------------------------------------------------------
+        num_classes = constants.num_class_dict[args.dataset]
+        class_counts = np.zeros(num_classes, dtype=np.float64)
+        for cid in client_ids:
+            label_counter = dm.label_dist_dict.get(cid, {})
+            for lbl, cnt in label_counter.items():
+                if 0 <= lbl < num_classes:
+                    class_counts[lbl] += cnt
+
+        # Avoid division by zero; unseen classes get zero weight.
+        eps = 1e-8
+        total = class_counts.sum()
+        if total > 0:
+            freq = class_counts / (total + eps)
+            inv_freq = 1.0 / (freq + eps)
+            # Normalise so that weights have mean 1.0 (keeps loss scale stable).
+            inv_freq /= inv_freq.mean()
+            class_weights = torch.tensor(inv_freq, dtype=torch.float32, device=device)
+        else:
+            class_weights = None
+
+        # Weighted NLLLoss: penalise minority-class errors more without
+        # altering the data distribution.
+        criterion = nn.NLLLoss(weight=class_weights).to(device)
         # Define the model
         # SERClassifier: utterance-level encoder (intra-utterance features)
         # SceneGRUWrapper: cross-utterance GRU wrapper
