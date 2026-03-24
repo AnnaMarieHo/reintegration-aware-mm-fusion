@@ -43,12 +43,15 @@ class SERClassifier(nn.Module):
         att_name: str='',
         d_head: int=6,
         audio_only: bool=False,
+        text_only: bool=False,
     ):
         super(SERClassifier, self).__init__()
+        assert not (audio_only and text_only), "audio_only and text_only are mutually exclusive"
         self.dropout_p = 0.1
         self.en_att    = en_att
         self.att_name  = att_name
         self.audio_only = audio_only
+        self.text_only  = text_only
 
         self.audio_conv = Conv1dEncoder(
             input_dim=audio_input_dim,
@@ -196,6 +199,11 @@ class SERClassifier(nn.Module):
                     x_text = torch.zeros_like(x_text)
                     if mask_b_reduced is not None:
                         mask_b_reduced = torch.zeros_like(mask_b_reduced, dtype=torch.bool)
+
+                if self.text_only:
+                    x_audio = torch.zeros_like(x_audio)
+                    if mask_a_reduced is not None:
+                        mask_a_reduced = torch.zeros_like(mask_a_reduced, dtype=torch.bool)
 
                 x_mm_input  = torch.cat((x_audio, x_text), dim=1)
 

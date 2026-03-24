@@ -13,13 +13,16 @@ python -m reintegration.train \
   --eval_only \
   --ckpt_path "/mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/log/fed_avg/iemocap/mfcc_mobilebert/fuse_base/hid128_le1_lr001_bs16_sr10_ep100/fold2/model.pt"
 
-python -m my_extensions.reintegration.train \
-    --dataset meld \
+python -m reintegration.train \
+    --holdout_clients 8 9 \
+    --mask_modality audio \
+    --dataset iemocap \
+    --data_dir reintegration/output \
     --modality multimodal \
-    --audio_feat mfcc     
+    --audio_feat mfcc \
     --text_feat mobilebert \
     --fed_alg fed_avg \
-    --num_epochs 200 \
+    --num_epochs 60 \
     --local_epochs 1 \
     --sample_rate 1.0 \
     --batch_size 16 \
@@ -27,7 +30,8 @@ python -m my_extensions.reintegration.train \
     --learning_rate 0.01 \
     --en_att \
     --att_name fuse_base \
-    --availability_process markov
+    --availability_process markov \
+
 """
 import torch
 import json
@@ -129,7 +133,33 @@ def parse_args():
         default='multihead',
         help='attention name'
     )
-    
+
+    parser.add_argument(
+        '--audio_only',
+        type=bool,
+        default=False,
+        help='use audio modality only (text branch zeroed before fusion)',
+    )
+    parser.add_argument(
+        '--en_audio_only',
+        dest='audio_only',
+        action='store_true',
+        help='enable audio-only mode (text branch zeroed before fusion)',
+    )
+
+    parser.add_argument(
+        '--text_only',
+        type=bool,
+        default=False,
+        help='use text modality only (audio branch zeroed before fusion)',
+    )
+    parser.add_argument(
+        '--en_text_only',
+        dest='text_only',
+        action='store_true',
+        help='enable text-only mode (audio branch zeroed before fusion)',
+    )
+
     parser.add_argument(
         '--learning_rate', 
         default=0.01,
@@ -429,7 +459,8 @@ if __name__ == '__main__':
             d_hid=args.hid_size,
             en_att=args.att,
             att_name=args.att_name,
-            audio_only=False,
+            audio_only=args.audio_only,
+            text_only=args.text_only,
         )
         global_model = SceneGRUWrapper(
             utterance_encoder=utterance_encoder,
