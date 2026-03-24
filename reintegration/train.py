@@ -318,6 +318,17 @@ def parse_args():
         choices=("audio", "text"),
         help="Which modality the Markov mask is applied to during reintegration eval (default: audio).",
     )
+    parser.add_argument(
+        "--holdout_clients",
+        type=str,
+        nargs="*",
+        default=[],
+        help=(
+            "Client IDs to hold out from FL training (e.g. --holdout_clients 8 9). "
+            "Held-out clients are excluded from every FL round but are evaluated on "
+            "UAR and reintegration metrics after training completes."
+        ),
+    )
     #------------------------------------------------------------------------------------------------
     args = parser.parse_args()
     return args
@@ -472,6 +483,10 @@ if __name__ == '__main__':
             server.result_path = Path(args.ckpt_path).parent
             save_result_dict[f'fold{fold_idx}'] = {}
 
+        holdout_set = set(str(c) for c in args.holdout_clients)
+        if holdout_set:
+            logging.info("Holdout clients (excluded from FL training): %s", sorted(holdout_set))
+
         # Training steps (skipped when --eval_only)
         for epoch in range(0 if args.eval_only else int(args.num_epochs)):
             # define list varibles that saves the weights, loss, num_sample, etc.
@@ -481,6 +496,9 @@ if __name__ == '__main__':
             for idx in server.clients_list[epoch]:
                 # Local training
                 client_id = client_ids[idx]
+                # Skip held-out clients — they are never used for training
+                if client_id in holdout_set:
+                    continue
                 dataloader = dataloader_dict[client_id]
                 if dataloader is None:
                     skip_client_ids.append(client_id)
@@ -651,6 +669,44 @@ if __name__ == '__main__':
         else:
             logging.info("Reintegration: skipped (need markov + dev + test loaders).")
             print("Reintegration: skipped (need markov + dev + test loaders).")
+        #------------------------------------------------------------------------------------------------
+        ## HOLDOUT CLIENT EVAL
+        # Run inference + reintegration eval on clients that were withheld from FL training.
+        # The best checkpoint (already loaded above) is used throughout.
+        if holdout_set:
+            save_result_dict[f'fold{fold_idx}']['holdout'] = {}
+            for hcid in sorted(holdout_set):
+                if hcid not in dataloader_dict:
+                    logging.warning("Holdout client %s has no dataloader, skipping.", hcid)
+                    continue
+                try:
+                    with torch.no_grad():
+                        server.inference(dataloader_dict[hcid])
+                    ho_uar = server.result.get('uar', float('nan'))
+                    ho_acc = server.result.get('acc', float('nan'))
+                    logging.info(
+                        "Holdout client %s — UAR: %.2f%%, Acc: %.2f%%", hcid, ho_uar, ho_acc
+                    )
+                    ho_result = {'uar': ho_uar, 'acc': ho_acc}
+
+                    if _reint_ok:
+                        try:
+                            with torch.no_grad():
+                                reint_ho = server.run_reintegration_eval(dataloader_dict[hcid])
+                            ho_result['reintegration'] = reint_ho
+                            logging.info(
+                                "Holdout client %s reintegration — mean_delta=%.4f, "
+                                "n_events=%d, UAR_stable=%.2f%%, UAR_masked=%.2f%%",
+                                hcid,
+                                reint_ho['mean_delta'], reint_ho['n_reint_events'],
+                                reint_ho['uar_stable'], reint_ho['uar_masked'],
+                            )
+                        except Exception as e:
+                            logging.exception("Holdout reintegration eval failed for client %s: %s", hcid, e)
+
+                    save_result_dict[f'fold{fold_idx}']['holdout'][hcid] = ho_result
+                except Exception as e:
+                    logging.exception("Holdout inference failed for client %s: %s", hcid, e)
         #------------------------------------------------------------------------------------------------
         # output to results
         server.save_json_file(
