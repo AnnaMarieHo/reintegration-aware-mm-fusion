@@ -5,5 +5,7 @@ reintegration/output/feature/
 __pycache__/
 reintegration/output/raw_iemocap/
 reintegration/output/log/
+reintegration/output/partition/iemocap/
+reintegration/output/partition/meld/
 reintegration/IEMOCAP/
 env/

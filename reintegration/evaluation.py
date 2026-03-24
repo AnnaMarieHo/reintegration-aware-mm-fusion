@@ -1,6 +1,4 @@
 """
-evaluation.py
-=============
 EvalMetric: accumulates per-batch predictions and computes epoch-level metrics.
 
 classification_summary() returns:
@@ -30,9 +28,9 @@ class EvalMetric:
         self.all_logits  = []   # list of 1-D np arrays (num_classes,)
         self.losses      = []   # list of scalar losses
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Classification (single-label)
-    # ─────────────────────────────────────────────────────────────────────
+    """
+    Classification (single-label)
+    """
 
     def append_classification_results(
         self,
@@ -99,9 +97,9 @@ class EvalMetric:
             'sample':   n,
         }
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Multilabel (ptb-xl only — kept for completeness, not used for MELD)
-    # ─────────────────────────────────────────────────────────────────────
+    """
+    Multilabel (ptb-xl only kept for completeness, not used for MELD)
+    """
 
     def append_multilabel_results(self, labels, logits, loss):
         if isinstance(loss, torch.Tensor):

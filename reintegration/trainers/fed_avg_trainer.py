@@ -14,7 +14,7 @@ from reintegration.evaluation import EvalMetric
 
 class ClientFedAvg(object):
     """
-    FedAvg client trainer — Phase 1 (establish reintegration phenomenon).
+    FedAvg client trainer 
 
     Training is stable-only: audio is always present during training.
     The model never sees audio absence, so it learns full (A,T) fusion
@@ -85,18 +85,18 @@ class ClientFedAvg(object):
                 optimizer.zero_grad()
 
                 if self.args.modality == "multimodal":
-                    # ── Unpack scene-level batch ───────────────────────────
+                    # Unpack scene-level batch
                     (scene_x_a, scene_x_b,
                      scene_len_a, scene_len_b,
-                     scene_labels, _) = batch_data   # scene_mask unused in Phase 1
+                     scene_labels, _) = batch_data   # scene_mask unused
 
                     scene_labels = scene_labels.to(self.device)   # (T,)
                     T = scene_labels.shape[0]
 
-                    # ── Stable-only forward pass ───────────────────────────
+                    # Stable-only forward pass
                     # Audio always present: all-ones mask.
                     # The model learns full (A,T) fusion exclusively.
-                    # No masked pass — the model must not learn any strategy
+                    # No masked pass. the model must not learn any strategy
                     # for handling absence, so the reintegration dip at test
                     # time reflects the unmitigated phenomenon.
                     stable_mask = torch.ones(T, device=self.device, dtype=torch.long)
@@ -113,7 +113,7 @@ class ClientFedAvg(object):
                     loss = self.criterion(log_preds, scene_labels)
 
                 else:
-                    # ── Unimodal path — unchanged ─────────────────────────
+                    # Unimodal path — unchanged
                     x, l, y = batch_data
                     x, l, y = x.to(self.device), l.to(self.device), y.to(self.device)
                     outputs, _ = self.model(x.float(), l)
@@ -121,12 +121,12 @@ class ClientFedAvg(object):
                         outputs = torch.log_softmax(outputs, dim=1)
                     loss = self.criterion(outputs, y)
 
-                # ── Backward ──────────────────────────────────────────────
+                # Backward
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 10.0)
                 optimizer.step()
 
-                # ── Metrics ───────────────────────────────────────────────
+                # Metrics
                 if self.args.modality == "multimodal":
                     if not self.multilabel:
                         self.eval.append_classification_results(

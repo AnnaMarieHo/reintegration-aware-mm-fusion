@@ -152,7 +152,7 @@ class Server(object):
         """
         Scene-level inference for dev/test evaluation.
 
-        Phase 1: always evaluates with the stable (all-ones) audio mask.
+        always evaluates with the stable (all-ones) audio mask.
         The model was trained on full audio; dev/test UAR is measured in
         the same condition to track learning progress across FL rounds.
 
@@ -211,7 +211,7 @@ class Server(object):
 
     def run_reintegration_eval(self, dataloader, recovery_window: int = 4):
         """
-        Per-timestep reintegration evaluation — the primary Phase 1 result.
+        Per-timestep reintegration evaluation. the primary result.
 
         Runs on the best checkpoint after FL training completes.
         For each test scene, the model is forwarded twice:
@@ -224,7 +224,7 @@ class Server(object):
 
         A positive mean_delta at offset 0 means the model makes more correct
         predictions when audio was continuously present than when audio just
-        returned after an absence run — the reintegration phenomenon exists.
+        returned after an absence run the reintegration phenomenon exists.
 
         A decaying recovery curve (delta shrinks at offsets 1,2,3,4) means
         the cost is localised to the boundary. A flat curve means the hidden
@@ -301,7 +301,7 @@ class Server(object):
                         if t_k >= T:
                             break
                         if k > 0 and mask_np[t_k] == 0:
-                            break   # another absence run — stop this event's window
+                            break   # another absence run stop this event's window
                         correct_s = int(pred_s_np[t_k] == labels_np[t_k])
                         correct_m = int(pred_m_np[t_k] == labels_np[t_k])
                         delta_by_offset[k].append(correct_s - correct_m)
@@ -339,7 +339,7 @@ class Server(object):
             'delta_uar':            uar_stable - uar_masked,
         }
 
-    # ── Remaining methods unchanged ───────────────────────────────────────
+    # Remaining methods unchanged 
 
     def get_num_params(self):
         model_parameters = filter(lambda p: p.requires_grad, self.global_model.parameters())
@@ -379,7 +379,7 @@ class Server(object):
             f.write(jsonString)
 
     def save_train_updates(self, model_updates, num_sample, result, delta_control=None):
-        # Move state dict tensors to CPU before storing — keeps GPU memory free
+        # Move state dict tensors to CPU before storing. keeps GPU memory free
         # between client training and aggregation.
         cpu_updates = {k: v.cpu() for k, v in model_updates.items()}
         self.model_updates.append(cpu_updates)

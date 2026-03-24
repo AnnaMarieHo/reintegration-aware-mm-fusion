@@ -311,6 +311,13 @@ def parse_args():
         action="store_true",
         help="Skip training; load checkpoint and run reintegration eval only (use with --ckpt_path).",
     )
+    parser.add_argument(
+        "--mask_modality",
+        type=str,
+        default="audio",
+        choices=("audio", "text"),
+        help="Which modality the Markov mask is applied to during reintegration eval (default: audio).",
+    )
     #------------------------------------------------------------------------------------------------
     args = parser.parse_args()
     return args
@@ -358,7 +365,7 @@ if __name__ == '__main__':
 
         shuffle    = client_id not in ['dev', 'test']
         # apply_mask=True for all splits so that dev/test dataloaders carry Markov
-        # masks. Training ignores scene_mask (stable-only, Phase 1). Dev/test need
+        # masks. Training ignores scene_mask (stable-only). Dev/test need
         # the masks so run_reintegration_eval() can locate reintegration events
         # (mask[t-1]==0, mask[t]==1) and run the stable vs masked contrast.
         # server.inference() uses the stable condition for UAR tracking throughout.
@@ -391,9 +398,6 @@ if __name__ == '__main__':
                 apply_mask      = apply_mask,
             )
         
-    # pdb.set_trace()
-    # We perform 5 fold experiments with 5 seeds
-    # for fold_idx in range(1, 6):
     for fold_idx in range(1, 6):
         # number of clients
         client_ids = [client_id for client_id in dm.client_ids if client_id not in ['dev', 'test']]
@@ -420,6 +424,7 @@ if __name__ == '__main__':
             utterance_encoder=utterance_encoder,
             num_classes=constants.num_class_dict[args.dataset],
             d_hid=args.hid_size,
+            mask_modality=args.mask_modality,
         )
         global_model = global_model.to(device)
 
@@ -565,18 +570,15 @@ if __name__ == '__main__':
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # Free the per-epoch result accumulator — it has served its purpose
-        # (best checkpoint already saved to disk by log_epoch_result).
-        # Holding all 200 rounds of train/dev/test result dicts in memory
-        # through the reintegration eval is unnecessary.
         server.result_dict.clear()
 
         #------------------------------------------------------------------------------------------------
-        ## REINTEGRATION EVAL — Phase 1 primary result
+        ## REINTEGRATION EVAL 
         # Runs once after FL training completes, on the best checkpoint
         # (selected by dev UAR). The model was trained stable-only and has
         # never seen audio absence. Any positive mean_delta at offset 0
         # is the unmitigated reintegration cost.
+        
         _reint_ok = (
             getattr(args, 'availability_process', None) == 'markov'
             and dataloader_dict is not None
