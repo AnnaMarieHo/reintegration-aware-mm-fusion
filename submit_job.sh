@@ -41,6 +41,7 @@ print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else
 export PYTHONPATH=$PYTHONPATH:$SCRATCH/reintegration-aware-mm-fusion
 
 python -m reintegration.train \
+    --holdout_clients 8 9 \
     --mask_modality text \
     --dataset iemocap \
     --data_dir reintegration/output \
