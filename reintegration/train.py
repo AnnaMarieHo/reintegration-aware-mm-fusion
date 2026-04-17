@@ -481,8 +481,9 @@ if __name__ == '__main__':
 
         server.initialize_log(fold_idx)
         server.sample_clients(
-            num_of_clients, 
-            sample_rate=args.sample_rate
+            num_of_clients,
+            sample_rate=args.sample_rate,
+            fold_idx=fold_idx,
         )
 
         # save json path

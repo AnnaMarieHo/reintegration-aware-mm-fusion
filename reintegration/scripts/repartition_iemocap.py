@@ -169,6 +169,7 @@ def main() -> None:
     by_interaction = {}
     for r in rows:
         parts = r["filename"].split("_")
+        
         if len(parts) < 2:
             inter = parts[0]
         else:
@@ -182,7 +183,9 @@ def main() -> None:
         """Chunk rows for a single interaction into scenes of size scene_size."""
         scenes = []
         for start in range(0, len(inter_rows), args.scene_size):
+            print(start)
             chunk = inter_rows[start : start + args.scene_size]
+            print(chunk)
             if not chunk:
                 continue
             scene = []
@@ -197,6 +200,7 @@ def main() -> None:
                     ]
                 )
             scenes.append(scene)
+        print(scenes)
         return scenes
 
     # Build a global, ordered scene list where each scene is contained

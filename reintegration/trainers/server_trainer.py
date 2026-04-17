@@ -102,10 +102,20 @@ class Server(object):
             model_setting_str += '_ml' + str(self.args.missing_label_rate).replace('.', '')
         return model_setting_str
 
-    def sample_clients(self, num_of_clients, sample_rate=0.1):
+    def sample_clients(self, num_of_clients, sample_rate=0.1, fold_idx: int = 1):
+        """
+        Build per-round client index lists for FedAvg partial participation.
+
+        Seeding uses both fold_idx and epoch so each outer-loop fold gets a
+        different subsample schedule; epoch-only seeding would repeat the same
+        schedule on every fold.
+        """
         self.clients_list = list()
+        # Large stride keeps (fold, epoch) pairs from colliding for typical num_epochs.
+        _fold_stride = 100_000
         for epoch in range(int(self.args.num_epochs)):
-            np.random.seed(epoch)
+            # np.random.seed(epoch)
+            np.random.seed(_fold_stride * int(fold_idx) + epoch)
             idxs_clients = np.random.choice(
                 range(num_of_clients),
                 int(sample_rate * num_of_clients),

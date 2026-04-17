@@ -63,7 +63,7 @@ def parse_args():
     parser.add_argument('--raw_data_dir', default=path_conf['data_dir'], type=str)
     parser.add_argument('--output_dir',   default=path_conf['output_dir'], type=str)
     parser.add_argument('--feature_type', default='mfcc', type=str)
-    parser.add_argument('--dataset',      default='meld', type=str)
+    parser.add_argument('--dataset',      default='iemocap', type=str)
     return parser.parse_args()
 
 
