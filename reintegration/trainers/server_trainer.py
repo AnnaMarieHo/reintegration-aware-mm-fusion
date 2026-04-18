@@ -240,6 +240,11 @@ class Server(object):
         the cost is localised to the boundary. A flat curve means the hidden
         state divergence persists across subsequent utterances.
 
+        Window UAR (uar_*_window): macro recall on the union of post-return
+        timesteps (+0..+recovery_window per event), with each timestep counted
+        once per scene if overlapping windows share indices. Excludes absent
+        timesteps so global delta_uar is not confounded with long-absence drag.
+
         Args:
             dataloader:      scene-level DataLoader (apply_mask=True)
             recovery_window: utterances after t_reint to track (default 4)
@@ -252,6 +257,10 @@ class Server(object):
             uar_stable          : float        — macro recall, stable (%)
             uar_masked          : float        — macro recall, masked (%)
             delta_uar           : float        — uar_stable - uar_masked
+            uar_stable_window   : float|None   — macro UAR on post-return window timesteps only (stable)
+            uar_masked_window   : float|None   — same timesteps, masked pass
+            delta_uar_window      : float|None   — uar_stable_window - uar_masked_window
+            n_window_timesteps    : int          — unique timesteps in union of windows (per-scene dedup)
         """
         self.global_model.eval()
 
@@ -260,6 +269,9 @@ class Server(object):
         all_labels       = []
         n_reint_events   = 0
         delta_by_offset  = {k: [] for k in range(recovery_window + 1)}
+        win_labels = []
+        win_preds_stable = []
+        win_preds_masked = []
 
         for batch_data in dataloader:
             if self.args.modality != "multimodal":
@@ -303,6 +315,7 @@ class Server(object):
             pred_m_np = pred_m.cpu().numpy()
             labels_np = labels.cpu().numpy()
 
+            seen_window_t = set()
             for t in range(1, T):
                 if mask_np[t - 1] == 0 and mask_np[t] == 1:
                     n_reint_events += 1
@@ -315,6 +328,11 @@ class Server(object):
                         correct_s = int(pred_s_np[t_k] == labels_np[t_k])
                         correct_m = int(pred_m_np[t_k] == labels_np[t_k])
                         delta_by_offset[k].append(correct_s - correct_m)
+                        if t_k not in seen_window_t:
+                            seen_window_t.add(t_k)
+                            win_labels.append(int(labels_np[t_k]))
+                            win_preds_stable.append(int(pred_s_np[t_k]))
+                            win_preds_masked.append(int(pred_m_np[t_k]))
 
         uar_stable = recall_score(
             all_labels, all_preds_stable, average='macro', zero_division=0
@@ -322,6 +340,19 @@ class Server(object):
         uar_masked = recall_score(
             all_labels, all_preds_masked, average='macro', zero_division=0
         ) * 100
+
+        if win_labels:
+            uar_stable_window = recall_score(
+                win_labels, win_preds_stable, average='macro', zero_division=0
+            ) * 100
+            uar_masked_window = recall_score(
+                win_labels, win_preds_masked, average='macro', zero_division=0
+            ) * 100
+            delta_uar_window = uar_stable_window - uar_masked_window
+        else:
+            uar_stable_window = None
+            uar_masked_window = None
+            delta_uar_window = None
 
         mean_delta_by_offset = {
             k: float(np.mean(v)) if v else float('nan')
@@ -347,6 +378,10 @@ class Server(object):
             'uar_stable':           uar_stable,
             'uar_masked':           uar_masked,
             'delta_uar':            uar_stable - uar_masked,
+            'uar_stable_window':    uar_stable_window,
+            'uar_masked_window':    uar_masked_window,
+            'delta_uar_window':     delta_uar_window,
+            'n_window_timesteps':   len(win_labels),
         }
 
     # Remaining methods unchanged 
