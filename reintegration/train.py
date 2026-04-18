@@ -439,7 +439,8 @@ if __name__ == '__main__':
                 apply_mask      = apply_mask,
             )
         
-    for fold_idx in range(1, 6):
+    # for fold_idx in range(1, 6):
+    for fold_idx in range(1, 2):
         # number of clients
         client_ids = [client_id for client_id in dm.client_ids if client_id not in ['dev', 'test']]
         num_of_clients = len(client_ids)
