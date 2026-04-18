@@ -359,6 +359,16 @@ def parse_args():
             "UAR and reintegration metrics after training completes."
         ),
     )
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help=(
+            "Optional extra directory segment under log/... and result/... so parallel "
+            "jobs (e.g. different --mask_modality or holdout) do not overwrite checkpoints "
+            "and result.json. Use a short filesystem-safe label, e.g. mask_text_ses5."
+        ),
+    )
     #------------------------------------------------------------------------------------------------
     args = parser.parse_args()
     return args
@@ -488,14 +498,17 @@ if __name__ == '__main__':
         )
 
         # save json path
-        save_json_path = Path(os.path.realpath(__file__)).parents[2].joinpath(
-            'result', 
+        _result_parts = [
+            'result',
             args.fed_alg,
             args.dataset,
             server.feature,
             server.att,
-            server.model_setting_str
-        )
+            server.model_setting_str,
+        ]
+        if getattr(args, 'run_name', None) and str(args.run_name).strip():
+            _result_parts.append(str(args.run_name).strip())
+        save_json_path = Path(os.path.realpath(__file__)).parents[2].joinpath(*_result_parts)
         Path.mkdir(
             save_json_path, 
             parents=True, 

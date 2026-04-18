@@ -51,14 +51,18 @@ class Server(object):
 
     def initialize_log(self, fold_idx: int=1):
         self.fold_idx   = fold_idx
+        _rn = getattr(self.args, "run_name", None)
+        _run = (_rn.strip(),) if _rn and str(_rn).strip() else ()
         self.log_path   = Path(self.args.data_dir).joinpath(
             'log', self.args.fed_alg, self.args.dataset,
             self.feature, self.att, self.model_setting_str,
+            *_run,
             f'fold{fold_idx}', 'raw_log'
         )
         self.result_path = Path(self.args.data_dir).joinpath(
             'log', self.args.fed_alg, self.args.dataset,
             self.feature, self.att, self.model_setting_str,
+            *_run,
             f'fold{fold_idx}'
         )
         Path.mkdir(self.log_path, parents=True, exist_ok=True)
