@@ -1,4 +1,5 @@
 import json
+import math
 import numpy as np
 import pandas as pd
 import copy, pdb, time, warnings, torch
@@ -11,6 +12,30 @@ from sklearn.metrics import recall_score, f1_score
 from reintegration.evaluation import EvalMetric
 
 import logging
+
+
+def sanitize_for_json(obj):
+    """
+    Recursively convert nested dicts/lists to JSON-safe values: float NaN/Inf -> None,
+    dict keys -> str, numpy scalars/arrays -> Python types.
+    """
+    if obj is None or isinstance(obj, (bool, str)):
+        return obj
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        x = float(obj)
+        return None if math.isnan(x) or math.isinf(x) else x
+    if isinstance(obj, float):
+        return None if math.isnan(obj) or math.isinf(obj) else obj
+    if isinstance(obj, dict):
+        return {str(k): sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [sanitize_for_json(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return sanitize_for_json(obj.tolist())
+    return obj
+
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)-3s ==> %(message)s',
@@ -117,9 +142,12 @@ class Server(object):
         self.clients_list = list()
         # Large stride keeps (fold, epoch) pairs from colliding for typical num_epochs.
         _fold_stride = 100_000
+        _sched = getattr(self.args, "client_schedule_seed", None)
         for epoch in range(int(self.args.num_epochs)):
-            # np.random.seed(epoch)
-            np.random.seed(_fold_stride * int(fold_idx) + epoch)
+            if _sched is not None:
+                np.random.seed(int(_sched) + _fold_stride * int(fold_idx) + epoch)
+            else:
+                np.random.seed(_fold_stride * int(fold_idx) + epoch)
             idxs_clients = np.random.choice(
                 range(num_of_clients),
                 int(sample_rate * num_of_clients),

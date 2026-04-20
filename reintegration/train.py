@@ -49,7 +49,7 @@ from pathlib import Path
 
 
 from reintegration.constants import constants
-from reintegration.trainers.server_trainer import Server
+from reintegration.trainers.server_trainer import Server, sanitize_for_json
 from reintegration.model.mm_models import SERClassifier, SceneGRUWrapper
 from reintegration.dataloader.dataload_manager import DataloadManager
 
@@ -369,6 +369,17 @@ def parse_args():
             "and result.json. Use a short filesystem-safe label, e.g. mask_text_ses5."
         ),
     )
+    parser.add_argument(
+        "--client_schedule_seed",
+        type=int,
+        default=None,
+        help=(
+            "If set, FedAvg partial-participation subsamples use "
+            "seed + 100000*fold_idx + round (same fold/round index as before). "
+            "Use the same value across runs to match client schedules across experiments; "
+            "omit to keep the legacy schedule (100000*fold_idx + round only)."
+        ),
+    )
     #------------------------------------------------------------------------------------------------
     args = parser.parse_args()
     return args
@@ -377,6 +388,11 @@ if __name__ == '__main__':
 
     # argument parser
     args = parse_args()
+    if getattr(args, "client_schedule_seed", None) is not None:
+        logging.info(
+            "Client schedule seed is set (%s): per-round FL subsamples match other runs using the same seed.",
+            args.client_schedule_seed,
+        )
 
     # data manager
     dm = DataloadManager(args)
@@ -655,6 +671,8 @@ if __name__ == '__main__':
             dataloader_dict.get('test') is not None if dataloader_dict else False,
             _reint_ok,
         )
+        reint_splits = None
+        holdout_reint_detail = {}
         if _reint_ok:
             try:
                 # Load best checkpoint before running reintegration eval
@@ -741,6 +759,11 @@ if __name__ == '__main__':
                         f'+{k}:{v:.4f}' for k, v in sorted(test_curve.items())
                     )
                     logging.info("Test recovery curve: %s", curve_str)
+                reint_splits = {
+                    'dev': reint_dev,
+                    'test': reint_test,
+                    'test_all_zeros_audio': reint_test_all_zeros,
+                }
             except Exception as e:
                 logging.exception("Reintegration eval failed: %s", e)
                 print("Reintegration eval FAILED:", e)
@@ -796,10 +819,30 @@ if __name__ == '__main__':
                                 )
                         except Exception as e:
                             logging.exception("Holdout reintegration eval failed for client %s: %s", hcid, e)
+                        if _reint_ok and 'reintegration' in ho_result:
+                            holdout_reint_detail[str(hcid)] = ho_result['reintegration']
 
                     save_result_dict[f'fold{fold_idx}']['holdout'][hcid] = ho_result
                 except Exception as e:
                     logging.exception("Holdout inference failed for client %s: %s", hcid, e)
+        if reint_splits is not None:
+            _detail_path = save_json_path.joinpath(f'reintegration_detailed_fold{fold_idx}.json')
+            _detail_payload = {
+                'meta': {
+                    'fold_idx': fold_idx,
+                    'client_schedule_seed': getattr(args, 'client_schedule_seed', None),
+                    'mask_modality': getattr(args, 'mask_modality', None),
+                    'dataset': args.dataset,
+                    'availability_process': getattr(args, 'availability_process', None),
+                },
+                'splits': reint_splits,
+                'holdout': holdout_reint_detail,
+            }
+            server.save_json_file(
+                sanitize_for_json(_detail_payload),
+                _detail_path,
+            )
+            logging.info('Wrote per-event reintegration lists (delta_by_offset) to %s', _detail_path)
         #------------------------------------------------------------------------------------------------
         # output to results
         server.save_json_file(

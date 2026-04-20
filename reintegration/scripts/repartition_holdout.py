@@ -40,8 +40,16 @@ Speaker extraction from filename:
 
 Usage:
 
-python -m my_extensions.reintegration.scripts.repartition_holdout   --parquet_dir  /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/IEMOCAP   --wav_root     /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/raw_iemocap/wavs   --output_dir   /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/ou
-tput/partition/holdout --holdout_session 5 --scene_size   15 --dev_frac 0.15
+python -m my_extensions.reintegration.scripts.repartition_holdout   --parquet_dir  /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/IEMOCAP   --wav_root     /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/raw_iemocap/wavs   --output_dir   /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout --holdout_session 5 --scene_size   15 --dev_frac 0.15
+
+python -m my_extensions.reintegration.scripts.repartition_holdout   --parquet_dir  /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/IEMOCAP   --wav_root     /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/raw_iemocap/wavs   --output_dir   /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_1 --holdout_session 1 --scene_size   15 --dev_frac 0.15
+
+python -m my_extensions.reintegration.scripts.repartition_holdout   --parquet_dir  /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/IEMOCAP   --wav_root     /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/raw_iemocap/wavs   --output_dir   /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_2 --holdout_session 2 --scene_size   15 --dev_frac 0.15
+
+python -m my_extensions.reintegration.scripts.repartition_holdout   --parquet_dir  /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/IEMOCAP   --wav_root     /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/raw_iemocap/wavs   --output_dir   /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_3 --holdout_session 3 --scene_size   15 --dev_frac 0.15
+
+python -m my_extensions.reintegration.scripts.repartition_holdout   --parquet_dir  /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/IEMOCAP   --wav_root     /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/raw_iemocap/wavs   --output_dir   /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_4 --holdout_session 4 --scene_size   15 --dev_frac 0.15
+
 
   python -m reintegration.scripts.repartition_holdout \\
     --parquet_dir  /path/to/iemocap_parquet \\
@@ -149,7 +157,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--holdout_session",
         type=int,
-        default=5,
+        # default=5,
+        default=1,
         choices=[1, 2, 3, 4, 5],
         help="IEMOCAP session number to hold out as the test set (default: 5).",
     )
