@@ -3,6 +3,7 @@ import math
 import numpy as np
 import pandas as pd
 import copy, pdb, time, warnings, torch
+import torch.nn.functional as F
 
 from pathlib import Path
 from copy import deepcopy
@@ -277,6 +278,10 @@ class Server(object):
         once per scene if overlapping windows share indices. Excludes absent
         timesteps so global delta_uar is not confounded with long-absence drag.
 
+        Soft belief metrics (same timesteps as the binary recovery curve): for each
+        offset k, log p(y*) gap and KL(P_stable||P_masked) use full logits; they
+        measure how much the stable vs masked distributions differ, not only argmax.
+
         Args:
             dataloader:      scene-level DataLoader (apply_mask=True)
             recovery_window: utterances after t_reint to track (default 4)
@@ -293,6 +298,12 @@ class Server(object):
             uar_masked_window   : float|None   — same timesteps, masked pass
             delta_uar_window      : float|None   — uar_stable_window - uar_masked_window
             n_window_timesteps    : int          — unique timesteps in union of windows (per-scene dedup)
+            mean_logp_gap_by_offset : dict[int, float] — mean log p_s(y*) − log p_m(y*) at each offset (nats)
+            mean_kl_forward_by_offset: dict[int, float] — mean KL(P_stable || P_masked) at each offset (nats)
+            mean_disagree_by_offset : dict[int, float] — mean 1[argmax_s ≠ argmax_m] at each offset
+            logp_gap_by_offset    : dict[int, list[float]] — raw values for aggregation / bootstrap
+            kl_forward_by_offset  : dict[int, list[float]]
+            disagree_by_offset    : dict[int, list[float]]
         """
         self.global_model.eval()
 
@@ -301,6 +312,9 @@ class Server(object):
         all_labels       = []
         n_reint_events   = 0
         delta_by_offset  = {k: [] for k in range(recovery_window + 1)}
+        logp_gap_by_offset = {k: [] for k in range(recovery_window + 1)}
+        kl_forward_by_offset = {k: [] for k in range(recovery_window + 1)}
+        disagree_by_offset = {k: [] for k in range(recovery_window + 1)}
         win_labels = []
         win_preds_stable = []
         win_preds_masked = []
@@ -347,6 +361,9 @@ class Server(object):
             pred_m_np = pred_m.cpu().numpy()
             labels_np = labels.cpu().numpy()
 
+            log_p_s = F.log_softmax(preds_stable, dim=-1).detach().cpu().numpy()
+            log_p_m = F.log_softmax(preds_masked, dim=-1).detach().cpu().numpy()
+
             seen_window_t = set()
             for t in range(1, T):
                 if mask_np[t - 1] == 0 and mask_np[t] == 1:
@@ -360,6 +377,20 @@ class Server(object):
                         correct_s = int(pred_s_np[t_k] == labels_np[t_k])
                         correct_m = int(pred_m_np[t_k] == labels_np[t_k])
                         delta_by_offset[k].append(correct_s - correct_m)
+
+                        y_idx = int(labels_np[t_k])
+                        logp_gap = float(log_p_s[t_k, y_idx] - log_p_m[t_k, y_idx])
+                        logp_gap_by_offset[k].append(logp_gap)
+
+                        # KL(P_stable || P_masked) in nats; same support as softmax rows
+                        p_row = np.exp(log_p_s[t_k])
+                        kl_f = float(np.sum(p_row * (log_p_s[t_k] - log_p_m[t_k])))
+                        kl_forward_by_offset[k].append(kl_f)
+
+                        disagree_by_offset[k].append(
+                            float(pred_s_np[t_k] != pred_m_np[t_k])
+                        )
+
                         if t_k not in seen_window_t:
                             seen_window_t.add(t_k)
                             win_labels.append(int(labels_np[t_k]))
@@ -386,14 +417,33 @@ class Server(object):
             uar_masked_window = None
             delta_uar_window = None
 
-        mean_delta_by_offset = {
-            k: float(np.mean(v)) if v else float('nan')
-            for k, v in delta_by_offset.items()
-        }
+        def _mean_list(d):
+            return {
+                kk: float(np.mean(vv)) if vv else float('nan')
+                for kk, vv in d.items()
+            }
+
+        mean_delta_by_offset = _mean_list(delta_by_offset)
         mean_delta = mean_delta_by_offset[0]
+
+        mean_logp_gap_by_offset = _mean_list(logp_gap_by_offset)
+        mean_kl_forward_by_offset = _mean_list(kl_forward_by_offset)
+        mean_disagree_by_offset = _mean_list(disagree_by_offset)
 
         curve_str = ', '.join(
             f'+{k}:{mean_delta_by_offset[k]:.4f} (n={len(delta_by_offset[k])})'
+            for k in range(recovery_window + 1)
+        )
+        logp_str = ', '.join(
+            f'+{k}:{mean_logp_gap_by_offset[k]:.4f}'
+            for k in range(recovery_window + 1)
+        )
+        kl_str = ', '.join(
+            f'+{k}:{mean_kl_forward_by_offset[k]:.4f}'
+            for k in range(recovery_window + 1)
+        )
+        dis_str = ', '.join(
+            f'+{k}:{mean_disagree_by_offset[k]:.4f}'
             for k in range(recovery_window + 1)
         )
         logging.info(
@@ -401,6 +451,9 @@ class Server(object):
             f'UAR_stable={uar_stable:.2f}%, UAR_masked={uar_masked:.2f}%'
         )
         logging.info(f'Recovery curve: {curve_str}')
+        logging.info(f'Log-prob gap on true class (nats): {logp_str}')
+        logging.info(f'KL(P_stable || P_masked) (nats): {kl_str}')
+        logging.info(f'Argmax disagreement rate: {dis_str}')
 
         return {
             'mean_delta':           mean_delta,
@@ -414,6 +467,12 @@ class Server(object):
             'uar_masked_window':    uar_masked_window,
             'delta_uar_window':     delta_uar_window,
             'n_window_timesteps':   len(win_labels),
+            'mean_logp_gap_by_offset': mean_logp_gap_by_offset,
+            'mean_kl_forward_by_offset': mean_kl_forward_by_offset,
+            'mean_disagree_by_offset': mean_disagree_by_offset,
+            'logp_gap_by_offset':   {k: v for k, v in logp_gap_by_offset.items()},
+            'kl_forward_by_offset': {k: v for k, v in kl_forward_by_offset.items()},
+            'disagree_by_offset':   {k: v for k, v in disagree_by_offset.items()},
         }
 
     # Remaining methods unchanged 
