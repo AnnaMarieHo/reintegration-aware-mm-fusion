@@ -77,6 +77,7 @@ def set_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
 
+
 def parse_args():
     # read path config files
     path_conf = dict()
@@ -686,79 +687,23 @@ if __name__ == '__main__':
                     logging.warning("Reintegration eval: no checkpoint found, using final model weights")
 
                 with torch.no_grad():
-                    reint_dev  = server.run_reintegration_eval(dataloader_dict['dev'])
-                    reint_test = server.run_reintegration_eval(dataloader_dict['test'])
-                    reint_test_all_zeros = server.run_reintegration_eval(
-                        dataloader_dict['test_all_zeros_audio']
+                    reint_dev = server.run_reintegration_eval(
+                        dataloader_dict['dev'], split_label='dev'
                     )
+                    reint_test = server.run_reintegration_eval(
+                        dataloader_dict['test'], split_label='test'
+                    )
+                    reint_test_all_zeros = server.run_reintegration_eval(
+                        dataloader_dict['test_all_zeros_audio'],
+                        split_label='test_all_zeros_audio',
+                    )
+                logging.info(
+                    "Reintegration eval order (see [dev] / [test] / [test_all_zeros_audio] "
+                    "prefixes on the detailed lines above): dev → test → test_all_zeros_audio."
+                )
                 save_result_dict[f'fold{fold_idx}']['reintegration_dev']  = reint_dev
                 save_result_dict[f'fold{fold_idx}']['reintegration_test'] = reint_test
                 save_result_dict[f'fold{fold_idx}']['reintegration_test_all_zeros_audio'] = reint_test_all_zeros
-                logging.info(
-                    "Reintegration dev:  mean_delta=%.4f, n_events=%d, "
-                    "UAR_stable=%.2f%%, UAR_masked=%.2f%%",
-                    reint_dev['mean_delta'], reint_dev['n_reint_events'],
-                    reint_dev['uar_stable'], reint_dev['uar_masked']
-                )
-                if reint_dev.get('n_window_timesteps', 0):
-                    logging.info(
-                        "Reintegration dev (window UAR): n_win=%d, "
-                        "UAR_stable=%.2f%%, UAR_masked=%.2f%%, delta_uar_window=%.2f%%",
-                        reint_dev['n_window_timesteps'],
-                        reint_dev['uar_stable_window'],
-                        reint_dev['uar_masked_window'],
-                        reint_dev['delta_uar_window'],
-                    )
-                else:
-                    logging.info("Reintegration dev (window UAR): n_win=0")
-                dev_curve = reint_dev.get('mean_delta_by_offset', {})
-                if dev_curve:
-                    curve_str = ', '.join(
-                        f'+{k}:{v:.4f}' for k, v in sorted(dev_curve.items())
-                    )
-                    logging.info("Dev  recovery curve: %s", curve_str)
-
-                logging.info(
-                    "Reintegration test: mean_delta=%.4f, n_events=%d, "
-                    "UAR_stable=%.2f%%, UAR_masked=%.2f%%",
-                    reint_test['mean_delta'], reint_test['n_reint_events'],
-                    reint_test['uar_stable'], reint_test['uar_masked']
-                )
-                if reint_test.get('n_window_timesteps', 0):
-                    logging.info(
-                        "Reintegration test (window UAR): n_win=%d, "
-                        "UAR_stable=%.2f%%, UAR_masked=%.2f%%, delta_uar_window=%.2f%%",
-                        reint_test['n_window_timesteps'],
-                        reint_test['uar_stable_window'],
-                        reint_test['uar_masked_window'],
-                        reint_test['delta_uar_window'],
-                    )
-                else:
-                    logging.info("Reintegration test (window UAR): n_win=0")
-                logging.info(
-                    "Reintegration test (all-zeros audio ablation): n_events=%d, "
-                    "UAR_stable=%.2f%%, UAR_masked=%.2f%%, delta_uar=%.2f%%",
-                    reint_test_all_zeros['n_reint_events'],
-                    reint_test_all_zeros['uar_stable'], reint_test_all_zeros['uar_masked'],
-                    reint_test_all_zeros['delta_uar']
-                )
-                if reint_test_all_zeros.get('n_window_timesteps', 0):
-                    logging.info(
-                        "Reintegration test all-zeros (window UAR): n_win=%d, "
-                        "UAR_stable=%.2f%%, UAR_masked=%.2f%%, delta_uar_window=%.2f%%",
-                        reint_test_all_zeros['n_window_timesteps'],
-                        reint_test_all_zeros['uar_stable_window'],
-                        reint_test_all_zeros['uar_masked_window'],
-                        reint_test_all_zeros['delta_uar_window'],
-                    )
-                else:
-                    logging.info("Reintegration test all-zeros (window UAR): n_win=0")
-                test_curve = reint_test.get('mean_delta_by_offset', {})
-                if test_curve:
-                    curve_str = ', '.join(
-                        f'+{k}:{v:.4f}' for k, v in sorted(test_curve.items())
-                    )
-                    logging.info("Test recovery curve: %s", curve_str)
                 reint_splits = {
                     'dev': reint_dev,
                     'test': reint_test,
@@ -793,30 +738,11 @@ if __name__ == '__main__':
                     if _reint_ok:
                         try:
                             with torch.no_grad():
-                                reint_ho = server.run_reintegration_eval(dataloader_dict[hcid])
+                                reint_ho = server.run_reintegration_eval(
+                                    dataloader_dict[hcid],
+                                    split_label=f'holdout_{hcid}',
+                                )
                             ho_result['reintegration'] = reint_ho
-                            logging.info(
-                                "Holdout client %s reintegration — mean_delta=%.4f, "
-                                "n_events=%d, UAR_stable=%.2f%%, UAR_masked=%.2f%%",
-                                hcid,
-                                reint_ho['mean_delta'], reint_ho['n_reint_events'],
-                                reint_ho['uar_stable'], reint_ho['uar_masked'],
-                            )
-                            if reint_ho.get('n_window_timesteps', 0):
-                                logging.info(
-                                    "Holdout client %s reintegration (window UAR): n_win=%d, "
-                                    "UAR_stable=%.2f%%, UAR_masked=%.2f%%, delta_uar_window=%.2f%%",
-                                    hcid,
-                                    reint_ho['n_window_timesteps'],
-                                    reint_ho['uar_stable_window'],
-                                    reint_ho['uar_masked_window'],
-                                    reint_ho['delta_uar_window'],
-                                )
-                            else:
-                                logging.info(
-                                    "Holdout client %s reintegration (window UAR): n_win=0",
-                                    hcid,
-                                )
                         except Exception as e:
                             logging.exception("Holdout reintegration eval failed for client %s: %s", hcid, e)
                         if _reint_ok and 'reintegration' in ho_result:

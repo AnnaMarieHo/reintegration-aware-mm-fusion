@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from pathlib import Path
 from copy import deepcopy
+from typing import Optional
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import recall_score, f1_score
 
@@ -252,7 +253,12 @@ class Server(object):
         else:
             self.result = self.eval.multilabel_summary()
 
-    def run_reintegration_eval(self, dataloader, recovery_window: int = 4):
+    def run_reintegration_eval(
+        self,
+        dataloader,
+        recovery_window: int = 4,
+        split_label: Optional[str] = None,
+    ):
         """
         Per-timestep reintegration evaluation. the primary result.
 
@@ -285,6 +291,7 @@ class Server(object):
         Args:
             dataloader:      scene-level DataLoader (apply_mask=True)
             recovery_window: utterances after t_reint to track (default 4)
+            split_label:     optional tag (e.g. dev / test) prefixed in log lines
 
         Returns dict with keys:
             mean_delta          : float        — mean delta at offset 0
@@ -304,6 +311,7 @@ class Server(object):
             logp_gap_by_offset    : dict[int, list[float]] — raw values for aggregation / bootstrap
             kl_forward_by_offset  : dict[int, list[float]]
             disagree_by_offset    : dict[int, list[float]]
+            split_label           : optional str — same tag passed in (stored for JSON)
         """
         self.global_model.eval()
 
@@ -446,16 +454,24 @@ class Server(object):
             f'+{k}:{mean_disagree_by_offset[k]:.4f}'
             for k in range(recovery_window + 1)
         )
+        lp = f'[{split_label}] ' if split_label else ''
         logging.info(
-            f'Reintegration eval: n_events={n_reint_events}, '
+            f'{lp}Reintegration eval: n_events={n_reint_events}, '
             f'UAR_stable={uar_stable:.2f}%, UAR_masked={uar_masked:.2f}%'
         )
-        logging.info(f'Recovery curve: {curve_str}')
-        logging.info(f'Log-prob gap on true class (nats): {logp_str}')
-        logging.info(f'KL(P_stable || P_masked) (nats): {kl_str}')
-        logging.info(f'Argmax disagreement rate: {dis_str}')
+        logging.info(f'{lp}Recovery curve: {curve_str}')
+        logging.info(f'{lp}Log-prob gap on true class (nats): {logp_str}')
+        logging.info(f'{lp}KL(P_stable || P_masked) (nats): {kl_str}')
+        logging.info(f'{lp}Argmax disagreement rate: {dis_str}')
+        if n_reint_events == 0:
+            logging.info(
+                f'{lp}No reintegration events (no mask 0→1 transitions); per-offset '
+                f'curves are empty. Scene-level UAR_stable / UAR_masked still summarize '
+                f'the two full-scene passes.'
+            )
 
         return {
+            'split_label':          split_label,
             'mean_delta':           mean_delta,
             'delta_by_offset':      {k: v for k, v in delta_by_offset.items()},
             'mean_delta_by_offset': mean_delta_by_offset,
