@@ -459,6 +459,16 @@ class Server(object):
             f'{lp}Reintegration eval: n_events={n_reint_events}, '
             f'UAR_stable={uar_stable:.2f}%, UAR_masked={uar_masked:.2f}%'
         )
+        if win_labels:
+            logging.info(
+                f'{lp}Window UAR (post-reint timestep union): n_win={len(win_labels)}, '
+                f'UAR_stable={uar_stable_window:.2f}%, UAR_masked={uar_masked_window:.2f}%, '
+                f'delta_uar_window={delta_uar_window:.2f}%'
+            )
+        else:
+            logging.info(
+                f'{lp}Window UAR (post-reint timestep union): n_win=0'
+            )
         logging.info(f'{lp}Recovery curve: {curve_str}')
         logging.info(f'{lp}Log-prob gap on true class (nats): {logp_str}')
         logging.info(f'{lp}KL(P_stable || P_masked) (nats): {kl_str}')
