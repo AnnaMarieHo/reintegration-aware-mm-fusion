@@ -256,7 +256,7 @@ class Server(object):
     def run_reintegration_eval(
         self,
         dataloader,
-        recovery_window: int = 4,
+        recovery_window: int = 2,
         split_label: Optional[str] = None,
     ):
         """
