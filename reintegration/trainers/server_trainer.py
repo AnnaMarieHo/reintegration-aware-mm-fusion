@@ -323,6 +323,9 @@ class Server(object):
         logp_gap_by_offset = {k: [] for k in range(recovery_window + 1)}
         kl_forward_by_offset = {k: [] for k in range(recovery_window + 1)}
         disagree_by_offset = {k: [] for k in range(recovery_window + 1)}
+        offset_labels = {k: [] for k in range(recovery_window + 1)}
+        offset_preds_stable = {k: [] for k in range(recovery_window + 1)}
+        offset_preds_masked = {k: [] for k in range(recovery_window + 1)}
         win_labels = []
         win_preds_stable = []
         win_preds_masked = []
@@ -386,18 +389,23 @@ class Server(object):
                         correct_m = int(pred_m_np[t_k] == labels_np[t_k])
                         delta_by_offset[k].append(correct_s - correct_m)
 
+                        # Log Probability: log(P_stable(y*)) - log(P_masked(y*))
                         y_idx = int(labels_np[t_k])
                         logp_gap = float(log_p_s[t_k, y_idx] - log_p_m[t_k, y_idx])
                         logp_gap_by_offset[k].append(logp_gap)
-
+    
                         # KL(P_stable || P_masked) in nats; same support as softmax rows
                         p_row = np.exp(log_p_s[t_k])
                         kl_f = float(np.sum(p_row * (log_p_s[t_k] - log_p_m[t_k])))
                         kl_forward_by_offset[k].append(kl_f)
 
+                        #P_stable(y*) != P_masked(y*)
                         disagree_by_offset[k].append(
                             float(pred_s_np[t_k] != pred_m_np[t_k])
                         )
+                        offset_labels[k].append(int(labels_np[t_k]))
+                        offset_preds_stable[k].append(int(pred_s_np[t_k]))
+                        offset_preds_masked[k].append(int(pred_m_np[t_k]))
 
                         if t_k not in seen_window_t:
                             seen_window_t.add(t_k)
@@ -437,6 +445,28 @@ class Server(object):
         mean_logp_gap_by_offset = _mean_list(logp_gap_by_offset)
         mean_kl_forward_by_offset = _mean_list(kl_forward_by_offset)
         mean_disagree_by_offset = _mean_list(disagree_by_offset)
+        window_uar_by_offset = {}
+        for k in range(recovery_window + 1):
+            if offset_labels[k]:
+                uar_s_k = recall_score(
+                    offset_labels[k], offset_preds_stable[k], average='macro', zero_division=0
+                ) * 100
+                uar_m_k = recall_score(
+                    offset_labels[k], offset_preds_masked[k], average='macro', zero_division=0
+                ) * 100
+                window_uar_by_offset[k] = {
+                    'n': len(offset_labels[k]),
+                    'uar_stable': float(uar_s_k),
+                    'uar_masked': float(uar_m_k),
+                    'delta_uar': float(uar_s_k - uar_m_k),
+                }
+            else:
+                window_uar_by_offset[k] = {
+                    'n': 0,
+                    'uar_stable': float('nan'),
+                    'uar_masked': float('nan'),
+                    'delta_uar': float('nan'),
+                }
 
         curve_str = ', '.join(
             f'+{k}:{mean_delta_by_offset[k]:.4f} (n={len(delta_by_offset[k])})'
@@ -452,6 +482,14 @@ class Server(object):
         )
         dis_str = ', '.join(
             f'+{k}:{mean_disagree_by_offset[k]:.4f}'
+            for k in range(recovery_window + 1)
+        )
+        uar_offset_str = ', '.join(
+            f"+{k}:delta={window_uar_by_offset[k]['delta_uar']:.2f}% "
+            f"(stable={window_uar_by_offset[k]['uar_stable']:.2f}%, "
+            f"masked={window_uar_by_offset[k]['uar_masked']:.2f}%, n={window_uar_by_offset[k]['n']})"
+            if window_uar_by_offset[k]['n'] > 0
+            else f"+{k}:delta=nan (stable=nan, masked=nan, n=0)"
             for k in range(recovery_window + 1)
         )
         lp = f'[{split_label}] ' if split_label else ''
@@ -470,6 +508,7 @@ class Server(object):
                 f'{lp}Window UAR (post-reint timestep union): n_win=0'
             )
         logging.info(f'{lp}Recovery curve: {curve_str}')
+        logging.info(f'{lp}Window UAR by offset: {uar_offset_str}')
         logging.info(f'{lp}Log-prob gap on true class (nats): {logp_str}')
         logging.info(f'{lp}KL(P_stable || P_masked) (nats): {kl_str}')
         logging.info(f'{lp}Argmax disagreement rate: {dis_str}')
@@ -493,6 +532,7 @@ class Server(object):
             'uar_masked_window':    uar_masked_window,
             'delta_uar_window':     delta_uar_window,
             'n_window_timesteps':   len(win_labels),
+            'window_uar_by_offset': window_uar_by_offset,
             'mean_logp_gap_by_offset': mean_logp_gap_by_offset,
             'mean_kl_forward_by_offset': mean_kl_forward_by_offset,
             'mean_disagree_by_offset': mean_disagree_by_offset,
