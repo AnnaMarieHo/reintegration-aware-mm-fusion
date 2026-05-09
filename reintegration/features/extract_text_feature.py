@@ -14,10 +14,9 @@ This format is consumed directly by SceneDataset in scene_dataloader.py.
 
 No normalisation is applied — BERT-family embeddings are already well-scaled.
 
-Usage:
-    python extract_text_features_scene.py \
-        --output_dir /path/to/output \
-        --dataset meld
+Example Usage:
+python -m my_extensions.reintegration.features.extract_text_feature --raw_data_dir /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/raw_iemocap/wavs --output_dir  /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_1 --feature_type mobilebert --dataset iemocap
+
 """
 
 import os

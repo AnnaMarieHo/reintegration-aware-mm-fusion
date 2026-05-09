@@ -19,10 +19,8 @@ Speaker normalisation:
     and per-split global normalisation for dev/test. This removes DC offset and
     is consistent across the entire pipeline.
 
-Usage:
-    python extract_audio_features_scene.py \
-        --output_dir /path/to/output \
-        --dataset meld
+Example Usage:
+python -m my_extensions.reintegration.features.extract_audio_feature --raw_data_dir /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/raw_iemocap/wavs --output_dir  /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_4 --feature_type mobilebert --dataset iemocap
 """
 
 import os

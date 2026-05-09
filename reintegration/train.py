@@ -381,6 +381,31 @@ def parse_args():
             "omit to keep the legacy schedule (100000*fold_idx + round only)."
         ),
     )
+    parser.add_argument(
+        "--reint_reset_scene_hidden",
+        action="store_true",
+        help=(
+            "After standard reintegration eval, run again with scene GRU hidden reset "
+            "every utterance (zero h0 each step) — utterance-level recovery ablation."
+        ),
+    )
+    parser.add_argument(
+        "--reint_collect_fuse_attention",
+        action="store_true",
+        help=(
+            "During reintegration eval, collect FuseBase attention entropy on the masked pass "
+            "at reintegration timesteps vs stable-present timesteps (requires fuse_base)."
+        ),
+    )
+    parser.add_argument(
+        "--reint_save_timestep_detail",
+        action="store_true",
+        help=(
+            "Add recovery_timestep_detail (per window timestep) and fuse attention "
+            "timestep_detail to reintegration JSON — fine-grained rows keyed by "
+            "scene_batch_idx and t_abs."
+        ),
+    )
     #------------------------------------------------------------------------------------------------
     args = parser.parse_args()
     return args
@@ -709,6 +734,38 @@ if __name__ == '__main__':
                     'test': reint_test,
                     'test_all_zeros_audio': reint_test_all_zeros,
                 }
+
+                if getattr(args, 'reint_reset_scene_hidden', False):
+                    with torch.no_grad():
+                        reint_dev_reset = server.run_reintegration_eval(
+                            dataloader_dict['dev'],
+                            split_label='dev',
+                            reset_scene_hidden_each_step=True,
+                        )
+                        reint_test_reset = server.run_reintegration_eval(
+                            dataloader_dict['test'],
+                            split_label='test',
+                            reset_scene_hidden_each_step=True,
+                        )
+                        reint_test_all_zeros_reset = server.run_reintegration_eval(
+                            dataloader_dict['test_all_zeros_audio'],
+                            split_label='test_all_zeros_audio',
+                            reset_scene_hidden_each_step=True,
+                        )
+                    save_result_dict[f'fold{fold_idx}'][
+                        'reintegration_dev_reset_scene_hidden'
+                    ] = reint_dev_reset
+                    save_result_dict[f'fold{fold_idx}'][
+                        'reintegration_test_reset_scene_hidden'
+                    ] = reint_test_reset
+                    save_result_dict[f'fold{fold_idx}'][
+                        'reintegration_test_all_zeros_audio_reset_scene_hidden'
+                    ] = reint_test_all_zeros_reset
+                    reint_splits['dev_reset_scene_hidden'] = reint_dev_reset
+                    reint_splits['test_reset_scene_hidden'] = reint_test_reset
+                    reint_splits['test_all_zeros_audio_reset_scene_hidden'] = (
+                        reint_test_all_zeros_reset
+                    )
             except Exception as e:
                 logging.exception("Reintegration eval failed: %s", e)
                 print("Reintegration eval FAILED:", e)
@@ -743,6 +800,16 @@ if __name__ == '__main__':
                                     split_label=f'holdout_{hcid}',
                                 )
                             ho_result['reintegration'] = reint_ho
+                            if getattr(args, 'reint_reset_scene_hidden', False):
+                                with torch.no_grad():
+                                    reint_ho_reset = server.run_reintegration_eval(
+                                        dataloader_dict[hcid],
+                                        split_label=f'holdout_{hcid}',
+                                        reset_scene_hidden_each_step=True,
+                                    )
+                                ho_result['reintegration_reset_scene_hidden'] = (
+                                    reint_ho_reset
+                                )
                         except Exception as e:
                             logging.exception("Holdout reintegration eval failed for client %s: %s", hcid, e)
                         if _reint_ok and 'reintegration' in ho_result:

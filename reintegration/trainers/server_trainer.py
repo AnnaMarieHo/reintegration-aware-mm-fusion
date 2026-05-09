@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from pathlib import Path
 from copy import deepcopy
 from typing import Optional
+
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import recall_score, f1_score
 
@@ -37,6 +38,18 @@ def sanitize_for_json(obj):
     if isinstance(obj, np.ndarray):
         return sanitize_for_json(obj.tolist())
     return obj
+
+
+def fuse_attention_entropy_per_timestep(fuse_att: torch.Tensor) -> np.ndarray:
+    """
+    Mean Shannon entropy over attention heads per utterance timestep (nats).
+
+    fuse_att: (T, n_heads, seq_len) post-softmax weights.
+    """
+    eps = 1e-12
+    p = fuse_att.clamp_min(eps)
+    ent = -(fuse_att * p.log()).sum(dim=-1)
+    return ent.mean(dim=-1).detach().cpu().numpy()
 
 
 logging.basicConfig(
@@ -258,6 +271,9 @@ class Server(object):
         dataloader,
         recovery_window: int = 2,
         split_label: Optional[str] = None,
+        reset_scene_hidden_each_step: bool = False,
+        collect_fuse_attention: Optional[bool] = None,
+        save_timestep_detail: Optional[bool] = None,
     ):
         """
         Per-timestep reintegration evaluation. the primary result.
@@ -292,6 +308,12 @@ class Server(object):
             dataloader:      scene-level DataLoader (apply_mask=True)
             recovery_window: utterances after t_reint to track (default 4)
             split_label:     optional tag (e.g. dev / test) prefixed in log lines
+            reset_scene_hidden_each_step: if True, scene GRU runs with a zero hidden
+                state at every utterance (utterance-level recovery ablation).
+            collect_fuse_attention: if True, record FuseBase attention entropy (masked
+                pass). If None, uses --reint_collect_fuse_attention from args.
+            save_timestep_detail: if True, attach recovery_timestep_detail and (when
+                collecting) fuse timestep rows. If None, uses --reint_save_timestep_detail.
 
         Returns dict with keys:
             mean_delta          : float        — mean delta at offset 0
@@ -312,8 +334,34 @@ class Server(object):
             kl_forward_by_offset  : dict[int, list[float]]
             disagree_by_offset    : dict[int, list[float]]
             split_label           : optional str — same tag passed in (stored for JSON)
+            fuse_attention        : optional dict — FuseBase entropy at reint vs stable-present
+                                    timesteps (masked pass); None if not collected
+            reset_scene_hidden_each_step : bool — echo of the flag stored for JSON
+            recovery_timestep_detail: optional list[dict] — one row per (scene, event, offset)
+                timestep in the recovery window with preds, KL, etc.; None if not saved
         """
         self.global_model.eval()
+
+        if save_timestep_detail is None:
+            save_timestep_detail = bool(
+                getattr(self.args, 'reint_save_timestep_detail', False)
+            )
+
+        if collect_fuse_attention is None:
+            collect_fuse_attention = bool(
+                getattr(self.args, 'reint_collect_fuse_attention', False)
+            )
+        _collect = (
+            collect_fuse_attention
+            and self.args.modality == "multimodal"
+            and bool(getattr(self.args, 'att', False))
+            and getattr(self.args, 'att_name', '') == 'fuse_base'
+        )
+        if collect_fuse_attention and self.args.modality == "multimodal" and not _collect:
+            logging.info(
+                "%sFuse attention collection skipped (requires --en_att --att_name fuse_base).",
+                f'[{split_label}] ' if split_label else '',
+            )
 
         all_preds_stable = []
         all_preds_masked = []
@@ -330,7 +378,14 @@ class Server(object):
         win_preds_stable = []
         win_preds_masked = []
 
+        fuse_ent_reint = []
+        fuse_ent_stable = []
+        recovery_timestep_detail = [] if save_timestep_detail else None
+        fuse_timestep_detail = [] if (save_timestep_detail and _collect) else None
+
+        scene_batch_idx = -1
         for batch_data in dataloader:
+            scene_batch_idx += 1
             if self.args.modality != "multimodal":
                 continue
 
@@ -348,16 +403,33 @@ class Server(object):
                 preds_stable, _ = self.global_model(
                     scene_x_a, scene_x_b,
                     scene_len_a, scene_len_b,
-                    ones_mask, self.device
+                    ones_mask,
+                    self.device,
+                    reset_scene_hidden_each_step=reset_scene_hidden_each_step,
+                    return_fuse_attention=False,
                 )
 
-            # Masked pass — Markov audio availability
+            # Masked pass — Markov availability
             with torch.no_grad():
-                preds_masked, _ = self.global_model(
-                    scene_x_a, scene_x_b,
-                    scene_len_a, scene_len_b,
-                    scene_mask, self.device
-                )
+                if _collect:
+                    preds_masked, _, fuse_att_m = self.global_model(
+                        scene_x_a, scene_x_b,
+                        scene_len_a, scene_len_b,
+                        scene_mask,
+                        self.device,
+                        reset_scene_hidden_each_step=reset_scene_hidden_each_step,
+                        return_fuse_attention=True,
+                    )
+                else:
+                    preds_masked, _ = self.global_model(
+                        scene_x_a, scene_x_b,
+                        scene_len_a, scene_len_b,
+                        scene_mask,
+                        self.device,
+                        reset_scene_hidden_each_step=reset_scene_hidden_each_step,
+                        return_fuse_attention=False,
+                    )
+                    fuse_att_m = None
 
             pred_s    = preds_stable.argmax(dim=-1)   # (T,)
             pred_m    = preds_masked.argmax(dim=-1)   # (T,)
@@ -374,6 +446,29 @@ class Server(object):
 
             log_p_s = F.log_softmax(preds_stable, dim=-1).detach().cpu().numpy()
             log_p_m = F.log_softmax(preds_masked, dim=-1).detach().cpu().numpy()
+
+            if _collect and fuse_att_m is not None:
+                ent_np = fuse_attention_entropy_per_timestep(fuse_att_m)
+                for t in range(T):
+                    if mask_np[t] != 1:
+                        continue
+                    is_reint = t > 0 and mask_np[t - 1] == 0 and mask_np[t] == 1
+                    is_stable = t == 0 or mask_np[t - 1] == 1
+                    if is_reint:
+                        fuse_ent_reint.append(float(ent_np[t]))
+                        bucket = 'reint'
+                    elif is_stable:
+                        fuse_ent_stable.append(float(ent_np[t]))
+                        bucket = 'stable_present'
+                    else:
+                        bucket = None
+                    if fuse_timestep_detail is not None and bucket is not None:
+                        fuse_timestep_detail.append({
+                            'scene_batch_idx': int(scene_batch_idx),
+                            't': int(t),
+                            'bucket': bucket,
+                            'entropy_nats': float(ent_np[t]),
+                        })
 
             seen_window_t = set()
             for t in range(1, T):
@@ -406,6 +501,26 @@ class Server(object):
                         offset_labels[k].append(int(labels_np[t_k]))
                         offset_preds_stable[k].append(int(pred_s_np[t_k]))
                         offset_preds_masked[k].append(int(pred_m_np[t_k]))
+
+                        if recovery_timestep_detail is not None:
+                            recovery_timestep_detail.append({
+                                'scene_batch_idx': int(scene_batch_idx),
+                                't_reint': int(t),
+                                'offset_k': int(k),
+                                't_abs': int(t_k),
+                                'y_true': int(labels_np[t_k]),
+                                'pred_stable': int(pred_s_np[t_k]),
+                                'pred_masked': int(pred_m_np[t_k]),
+                                'correct_stable': int(correct_s),
+                                'correct_masked': int(correct_m),
+                                'delta_correct': int(correct_s - correct_m),
+                                'logp_gap': float(logp_gap),
+                                'kl_forward': float(kl_f),
+                                'disagree': float(
+                                    pred_s_np[t_k] != pred_m_np[t_k]
+                                ),
+                                'mask_t': int(mask_np[t_k]),
+                            })
 
                         if t_k not in seen_window_t:
                             seen_window_t.add(t_k)
@@ -493,6 +608,8 @@ class Server(object):
             for k in range(recovery_window + 1)
         )
         lp = f'[{split_label}] ' if split_label else ''
+        if reset_scene_hidden_each_step:
+            lp += '[utt_encoder_recovery] '
         logging.info(
             f'{lp}Reintegration eval: n_events={n_reint_events}, '
             f'UAR_stable={uar_stable:.2f}%, UAR_masked={uar_masked:.2f}%'
@@ -512,6 +629,36 @@ class Server(object):
         logging.info(f'{lp}Log-prob gap on true class (nats): {logp_str}')
         logging.info(f'{lp}KL(P_stable || P_masked) (nats): {kl_str}')
         logging.info(f'{lp}Argmax disagreement rate: {dis_str}')
+
+        if save_timestep_detail:
+            n_rec = len(recovery_timestep_detail) if recovery_timestep_detail else 0
+            n_fuse = len(fuse_timestep_detail) if fuse_timestep_detail else 0
+            logging.info(
+                f'{lp}Per-timestep detail: recovery_rows={n_rec}, fuse_entropy_rows={n_fuse}'
+            )
+
+        fuse_attention_summary = None
+        if _collect:
+            fuse_attention_summary = {
+                'n_timesteps_reint': len(fuse_ent_reint),
+                'n_timesteps_stable_present': len(fuse_ent_stable),
+                'mean_entropy_nats_reint': float(np.mean(fuse_ent_reint))
+                if fuse_ent_reint
+                else float('nan'),
+                'mean_entropy_nats_stable': float(np.mean(fuse_ent_stable))
+                if fuse_ent_stable
+                else float('nan'),
+                'entropy_nats_reint': [float(x) for x in fuse_ent_reint],
+                'entropy_nats_stable': [float(x) for x in fuse_ent_stable],
+            }
+            if fuse_timestep_detail is not None:
+                fuse_attention_summary['timestep_detail'] = fuse_timestep_detail
+            logging.info(
+                f'{lp}FuseBase attention entropy (nats, mean over heads): '
+                f'reint n={len(fuse_ent_reint)} mean={fuse_attention_summary["mean_entropy_nats_reint"]:.4f}; '
+                f'stable-present n={len(fuse_ent_stable)} mean={fuse_attention_summary["mean_entropy_nats_stable"]:.4f}'
+            )
+
         if n_reint_events == 0:
             logging.info(
                 f'{lp}No reintegration events (no mask 0→1 transitions); per-offset '
@@ -539,6 +686,9 @@ class Server(object):
             'logp_gap_by_offset':   {k: v for k, v in logp_gap_by_offset.items()},
             'kl_forward_by_offset': {k: v for k, v in kl_forward_by_offset.items()},
             'disagree_by_offset':   {k: v for k, v in disagree_by_offset.items()},
+            'reset_scene_hidden_each_step': reset_scene_hidden_each_step,
+            'fuse_attention':       fuse_attention_summary,
+            'recovery_timestep_detail': recovery_timestep_detail,
         }
 
     # Remaining methods unchanged 

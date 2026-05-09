@@ -50,14 +50,8 @@ python -m my_extensions.reintegration.scripts.repartition_holdout   --parquet_di
 
 python -m my_extensions.reintegration.scripts.repartition_holdout   --parquet_dir  /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/IEMOCAP   --wav_root     /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/raw_iemocap/wavs   --output_dir   /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_4 --holdout_session 4 --scene_size   15 --dev_frac 0.15
 
-
-  python -m reintegration.scripts.repartition_holdout \\
-    --parquet_dir  /path/to/iemocap_parquet \\
-    --wav_root     /path/to/raw_iemocap/wavs \\
-    --output_dir   /path/to/reintegration/output \\
-    --holdout_session 5 \\
-    --scene_size   15 \\
-    --dev_frac     0.15
+Example Usage:
+python -m my_extensions.reintegration.scripts.repartition_holdout   --parquet_dir  /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/IEMOCAP   --wav_root     /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/raw_iemocap/wavs   --output_dir   /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_4 --holdout_session 4 --scene_size   15 --dev_frac 0.15
 """
 
 import argparse

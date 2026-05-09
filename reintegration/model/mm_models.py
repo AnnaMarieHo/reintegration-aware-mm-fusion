@@ -123,11 +123,23 @@ class SERClassifier(nn.Module):
         mask = mask.view(B, -1, factor).any(dim=2)
         return mask[:, :target_len]
 
-    def forward(self, x_audio, x_text, len_a, len_t, mask_a=None, mask_b=None):
+    def forward(
+        self,
+        x_audio,
+        x_text,
+        len_a,
+        len_t,
+        mask_a=None,
+        mask_b=None,
+        return_fuse_attention: bool = False,
+    ):
         """
         Utterance-level forward pass.
         Returns (preds, x_mm) — x_mm is consumed by SceneGRUWrapper.
+        If return_fuse_attention and fuse_base fusion is active, returns
+        (preds, x_mm, fuse_att) where fuse_att is post-softmax weights (B, d_head, seq_len).
         """
+        fuse_att_out = None
         x_audio = self.audio_conv(x_audio)
 
         len_a = len_a // 8
@@ -207,10 +219,17 @@ class SERClassifier(nn.Module):
 
                 x_mm_input  = torch.cat((x_audio, x_text), dim=1)
 
-                x_mm = self.fuse_att(
-                    x_mm_input, len_a, len_t, a_len_this,
-                    mask_a=mask_a_reduced, mask_b=mask_b_reduced
-                )
+                if return_fuse_attention:
+                    x_mm, fuse_att_out = self.fuse_att(
+                        x_mm_input, len_a, len_t, a_len_this,
+                        mask_a=mask_a_reduced, mask_b=mask_b_reduced,
+                        return_attention=True,
+                    )
+                else:
+                    x_mm = self.fuse_att(
+                        x_mm_input, len_a, len_t, a_len_this,
+                        mask_a=mask_a_reduced, mask_b=mask_b_reduced,
+                    )
         else:
             x_audio = torch.mean(x_audio, axis=1)
             x_text  = torch.mean(x_text,  axis=1)
@@ -222,6 +241,8 @@ class SERClassifier(nn.Module):
             x_mm    = torch.cat((x_audio, x_text), dim=1)
 
         preds = self.classifier(x_mm)
+        if fuse_att_out is not None:
+            return preds, x_mm, fuse_att_out
         return preds, x_mm
 
 
@@ -310,6 +331,7 @@ class SceneGRUWrapper(nn.Module):
         len_b_scene, # list of T tensors, each (1,)
         mask_scene,  # (T,) int tensor — 1=modality present, 0=modality absent
         device,
+        return_fuse_attention: bool = False,
     ):
         """
         Run SERClassifier on all T utterances in a single batched forward pass.
@@ -320,6 +342,7 @@ class SceneGRUWrapper(nn.Module):
 
         Returns:
             embeddings: (1, T, utt_emb_dim)
+            fuse_att_batch: if return_fuse_attention and fuse_base, (T, d_head, seq_len); else None
         """
         T = len(x_a_scene)
 
@@ -359,14 +382,27 @@ class SceneGRUWrapper(nn.Module):
                     fb_len = x_b_scene[t].shape[1]
                     mask_b[t, :fb_len] = True
 
-        _, x_mm_batch = self.utterance_encoder(
-            x_a_batch, x_b_batch, len_a, len_b,
-            mask_a=mask_a, mask_b=mask_b,
-        )
+        enc_kw = dict(mask_a=mask_a, mask_b=mask_b)
+        if return_fuse_attention:
+            enc_out = self.utterance_encoder(
+                x_a_batch, x_b_batch, len_a, len_b,
+                return_fuse_attention=True,
+                **enc_kw,
+            )
+            if len(enc_out) == 3:
+                _, x_mm_batch, fuse_att_batch = enc_out
+            else:
+                _, x_mm_batch = enc_out
+                fuse_att_batch = None
+        else:
+            _, x_mm_batch = self.utterance_encoder(
+                x_a_batch, x_b_batch, len_a, len_b, **enc_kw,
+            )
+            fuse_att_batch = None
         # x_mm_batch: (T, utt_emb_dim)
 
         embeddings = x_mm_batch.unsqueeze(0)   # (1, T, utt_emb_dim)
-        return embeddings
+        return embeddings, fuse_att_batch
 
     def forward(
         self,
@@ -376,6 +412,8 @@ class SceneGRUWrapper(nn.Module):
         len_b_scene,
         mask_scene,
         device,
+        reset_scene_hidden_each_step: bool = False,
+        return_fuse_attention: bool = False,
     ):
         """
         Full scene forward pass.
@@ -386,17 +424,36 @@ class SceneGRUWrapper(nn.Module):
         Returns:
             preds        : (T, num_classes) — per-utterance logits
             scene_hidden : (T, d_hid)       — GRU hidden states (for analysis)
+            fuse_att     : (T, d_head, seq_len) or None — only if return_fuse_attention and fuse_base
         """
-        embeddings = self.encode_utterances(
+        embeddings, fuse_att_batch = self.encode_utterances(
             x_a_scene, x_b_scene, len_a_scene, len_b_scene,
-            mask_scene, device
+            mask_scene, device,
+            return_fuse_attention=return_fuse_attention,
         )
         embeddings = self.dropout(embeddings)
 
-        scene_out, _ = self.scene_gru(embeddings)   # (1, T, d_hid)
-        scene_out     = scene_out.squeeze(0)         # (T, d_hid)
-        preds         = self.scene_classifier(scene_out)  # (T, num_classes)
+        if reset_scene_hidden_each_step:
+            B, T, _ = embeddings.shape
+            h0 = torch.zeros(
+                self.scene_gru.num_layers,
+                B,
+                self.d_hid,
+                device=embeddings.device,
+                dtype=embeddings.dtype,
+            )
+            outs = []
+            for t in range(T):
+                o, _ = self.scene_gru(embeddings[:, t : t + 1, :], h0)
+                outs.append(o[:, 0, :])
+            scene_out = torch.stack(outs, dim=0).squeeze(1)
+        else:
+            scene_out, _ = self.scene_gru(embeddings)   # (1, T, d_hid)
+            scene_out = scene_out.squeeze(0)             # (T, d_hid)
+        preds = self.scene_classifier(scene_out)  # (T, num_classes)
 
+        if return_fuse_attention:
+            return preds, scene_out, fuse_att_batch
         return preds, scene_out
 
 
@@ -464,8 +521,16 @@ class FuseBaseSelfAttention(nn.Module):
         self.d_hid    = d_hid
         self.d_head   = d_head
 
-    def forward(self, x: Tensor, val_a=None, val_b=None, a_len=None,
-                mask_a=None, mask_b=None):
+    def forward(
+        self,
+        x: Tensor,
+        val_a=None,
+        val_b=None,
+        a_len=None,
+        mask_a=None,
+        mask_b=None,
+        return_attention: bool = False,
+    ):
         att     = self.att_pool(self.att_fc1(x))
         att     = self.att_fc2(att)
         att     = att.transpose(1, 2)
@@ -489,6 +554,8 @@ class FuseBaseSelfAttention(nn.Module):
             att[:, :, a_len:].masked_fill_(~combined_mask_b.unsqueeze(1), -1e5)
 
         att = torch.softmax(att, dim=2)
-        x   = torch.matmul(att, x)
-        x   = x.reshape(x.shape[0], self.d_head * self.d_hid)
-        return x
+        pooled = torch.matmul(att, x)
+        pooled = pooled.reshape(pooled.shape[0], self.d_head * self.d_hid)
+        if return_attention:
+            return pooled, att
+        return pooled
