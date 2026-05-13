@@ -718,21 +718,21 @@ if __name__ == '__main__':
                     reint_test = server.run_reintegration_eval(
                         dataloader_dict['test'], split_label='test'
                     )
-                    reint_test_all_zeros = server.run_reintegration_eval(
-                        dataloader_dict['test_all_zeros_audio'],
-                        split_label='test_all_zeros_audio',
-                    )
+                    # reint_test_all_zeros = server.run_reintegration_eval(
+                    #     dataloader_dict['test_all_zeros_audio'],
+                    #     split_label='test_all_zeros_audio',
+                    # )
                 logging.info(
                     "Reintegration eval order (see [dev] / [test] / [test_all_zeros_audio] "
                     "prefixes on the detailed lines above): dev → test → test_all_zeros_audio."
                 )
                 save_result_dict[f'fold{fold_idx}']['reintegration_dev']  = reint_dev
                 save_result_dict[f'fold{fold_idx}']['reintegration_test'] = reint_test
-                save_result_dict[f'fold{fold_idx}']['reintegration_test_all_zeros_audio'] = reint_test_all_zeros
+                # save_result_dict[f'fold{fold_idx}']['reintegration_test_all_zeros_audio'] = reint_test_all_zeros
                 reint_splits = {
                     'dev': reint_dev,
                     'test': reint_test,
-                    'test_all_zeros_audio': reint_test_all_zeros,
+                    # 'test_all_zeros_audio': reint_test_all_zeros,
                 }
 
                 if getattr(args, 'reint_reset_scene_hidden', False):
@@ -747,25 +747,25 @@ if __name__ == '__main__':
                             split_label='test',
                             reset_scene_hidden_each_step=True,
                         )
-                        reint_test_all_zeros_reset = server.run_reintegration_eval(
-                            dataloader_dict['test_all_zeros_audio'],
-                            split_label='test_all_zeros_audio',
-                            reset_scene_hidden_each_step=True,
-                        )
+                        # reint_test_all_zeros_reset = server.run_reintegration_eval(
+                        #     dataloader_dict['test_all_zeros_audio'],
+                        #     split_label='test_all_zeros_audio',
+                        #     reset_scene_hidden_each_step=True,
+                        # )
                     save_result_dict[f'fold{fold_idx}'][
                         'reintegration_dev_reset_scene_hidden'
                     ] = reint_dev_reset
                     save_result_dict[f'fold{fold_idx}'][
                         'reintegration_test_reset_scene_hidden'
                     ] = reint_test_reset
-                    save_result_dict[f'fold{fold_idx}'][
-                        'reintegration_test_all_zeros_audio_reset_scene_hidden'
-                    ] = reint_test_all_zeros_reset
+                    # save_result_dict[f'fold{fold_idx}'][
+                    #     'reintegration_test_all_zeros_audio_reset_scene_hidden'
+                    # ] = reint_test_all_zeros_reset
                     reint_splits['dev_reset_scene_hidden'] = reint_dev_reset
                     reint_splits['test_reset_scene_hidden'] = reint_test_reset
-                    reint_splits['test_all_zeros_audio_reset_scene_hidden'] = (
-                        reint_test_all_zeros_reset
-                    )
+                    # reint_splits['test_all_zeros_audio_reset_scene_hidden'] = (
+                    #     reint_test_all_zeros_reset
+                    # )
             except Exception as e:
                 logging.exception("Reintegration eval failed: %s", e)
                 print("Reintegration eval FAILED:", e)

@@ -59,6 +59,43 @@ logging.basicConfig(
 )
 
 
+def calculate_jsd_per_timestep(att_p, att_q):
+    """
+    Computes Jensen-Shannon Divergence per timestep between two attention tensors.
+    att_p, att_q: Tensors of shape (T, d_head, seq_len)
+    Returns: numpy array of shape (T,)
+    """
+    # Average across heads to get (T, seq_len)
+    p = att_p.mean(dim=1) 
+    q = att_q.mean(dim=1)
+    
+    m = 0.5 * (p + q)
+    
+    def kl_div(a, b):
+        return (a * (torch.log(a + 1e-10) - torch.log(b + 1e-10))).sum(dim=-1)
+    
+    jsd = 0.5 * kl_div(p, m) + 0.5 * kl_div(q, m)
+    return jsd.detach().cpu().numpy()
+
+def calculate_modality_mass(att_tensor, a_len):
+    """
+    att_tensor: (B, d_head, seq_len) -> where seq_len = a_len + Tb
+    returns: audio_mass, text_mass
+    """
+    # Average across heads to get (B, seq_len)
+    avg_att = att_tensor.mean(dim=1) 
+    
+    # Slice the attention into its two components
+    audio_att = avg_att[:, :a_len] # (B, a_len)
+    text_att  = avg_att[:, a_len:] # (B, Tb)
+    
+    # Sum the probabilities (each row in avg_att sums to 1.0)
+    audio_mass = audio_att.sum(dim=1) # (B,)
+    text_mass  = text_att.sum(dim=1)  # (B,)
+    
+    return audio_mass.detach().cpu().numpy(), text_mass.detach().cpu().numpy()
+
+
 class Server(object):
     def __init__(self, args, model, device, criterion, client_ids):
         self.args         = args
@@ -400,19 +437,30 @@ class Server(object):
             # Stable pass — model in its trained condition
             ones_mask = torch.ones(T, device=self.device, dtype=torch.long)
             with torch.no_grad():
-                preds_stable, _ = self.global_model(
-                    scene_x_a, scene_x_b,
-                    scene_len_a, scene_len_b,
-                    ones_mask,
-                    self.device,
-                    reset_scene_hidden_each_step=reset_scene_hidden_each_step,
-                    return_fuse_attention=False,
-                )
+                if _collect:
+                    preds_stable, _, stable_fuse_att_m, stable_a_len_used = self.global_model(
+                        scene_x_a, scene_x_b,
+                        scene_len_a, scene_len_b,
+                        ones_mask,
+                        self.device,
+                        reset_scene_hidden_each_step=reset_scene_hidden_each_step,
+                        return_fuse_attention=True,
+                    )
+                else:
+                    preds_stable, _ = self.global_model(
+                        scene_x_a, scene_x_b,
+                        scene_len_a, scene_len_b,
+                        ones_mask,
+                        self.device,
+                        reset_scene_hidden_each_step=reset_scene_hidden_each_step,
+                        return_fuse_attention=False,
+                    )
+                    stable_fuse_att_m = None
 
             # Masked pass — Markov availability
             with torch.no_grad():
                 if _collect:
-                    preds_masked, _, fuse_att_m = self.global_model(
+                    preds_masked, _, masked_fuse_att_m, masked_a_len_used = self.global_model(
                         scene_x_a, scene_x_b,
                         scene_len_a, scene_len_b,
                         scene_mask,
@@ -429,7 +477,7 @@ class Server(object):
                         reset_scene_hidden_each_step=reset_scene_hidden_each_step,
                         return_fuse_attention=False,
                     )
-                    fuse_att_m = None
+                    masked_fuse_att_m = None
 
             pred_s    = preds_stable.argmax(dim=-1)   # (T,)
             pred_m    = preds_masked.argmax(dim=-1)   # (T,)
@@ -447,27 +495,65 @@ class Server(object):
             log_p_s = F.log_softmax(preds_stable, dim=-1).detach().cpu().numpy()
             log_p_m = F.log_softmax(preds_masked, dim=-1).detach().cpu().numpy()
 
-            if _collect and fuse_att_m is not None:
-                ent_np = fuse_attention_entropy_per_timestep(fuse_att_m)
-                for t in range(T):
-                    if mask_np[t] != 1:
-                        continue
-                    is_reint = t > 0 and mask_np[t - 1] == 0 and mask_np[t] == 1
-                    is_stable = t == 0 or mask_np[t - 1] == 1
-                    if is_reint:
-                        fuse_ent_reint.append(float(ent_np[t]))
-                        bucket = 'reint'
-                    elif is_stable:
-                        fuse_ent_stable.append(float(ent_np[t]))
-                        bucket = 'stable_present'
-                    else:
-                        bucket = None
-                    if fuse_timestep_detail is not None and bucket is not None:
+        if _collect and (masked_fuse_att_m is not None and stable_fuse_att_m is not None):
+            # Determine audio length for slicing
+            if len(masked_a_len_used) == len(stable_a_len_used):
+                a_len_this = stable_a_len_used
+
+            # Per-timestep diagnostics
+            stable_ent_np = fuse_attention_entropy_per_timestep(stable_fuse_att_m)
+            masked_ent_np = fuse_attention_entropy_per_timestep(masked_fuse_att_m)
+            jsd_np = calculate_jsd_per_timestep(stable_fuse_att_m, masked_fuse_att_m)
+
+            for t in range(T):
+                if mask_np[t] != 1:
+                    continue
+                    
+                # mass calculation 
+                a_mass_s, _ = calculate_modality_mass(stable_fuse_att_m[t], a_len_this)
+                a_mass_m, _ = calculate_modality_mass(masked_fuse_att_m[t], a_len_this)
+                mass_shift = a_mass_s - a_mass_m
+
+                is_reint_start = (t > 0 and mask_np[t - 1] == 0 and mask_np[t] == 1)
+                
+                if is_reint_start:
+                    for offset in range(3):
+                        idx = t + offset
+                        if idx >= T: break 
+                        
+                        # Re-calculate mass for the offset indices in the window
+                        a_m_s_win, _ = calculate_modality_mass(stable_fuse_att_m[idx], a_len_this)
+                        a_m_m_win, _ = calculate_modality_mass(masked_fuse_att_m[idx], a_len_this)
+                        m_shift_win = a_m_s_win - a_m_m_win
+
+                        fuse_ent_reint.append(float(masked_ent_np[idx]))
+                        if fuse_timestep_detail is not None:
+                            fuse_timestep_detail.append({
+                                'scene_batch_idx': int(scene_batch_idx),
+                                't': int(idx),
+                                'window_pos': offset,
+                                'bucket': 'reint_window',
+                                'audio_mass_stable_dist': a_m_s_win.tolist(), 
+                                'audio_mass_masked_dist': a_m_m_win.tolist(),
+                                'audio_mass_delta': float(m_shift_win.mean()),
+                                'jsd_stable_vs_masked': float(jsd_np[idx]),
+                                'jsd_dist': jsd_np[idx].tolist(),
+                                'delta_entropy': float(masked_ent_np[idx] - stable_ent_np[idx]),
+                            })
+                
+                elif t == 0 or mask_np[t-1] == 1:
+                    fuse_ent_stable.append(float(stable_ent_np[t]))
+                    if fuse_timestep_detail is not None:
                         fuse_timestep_detail.append({
                             'scene_batch_idx': int(scene_batch_idx),
                             't': int(t),
-                            'bucket': bucket,
-                            'entropy_nats': float(ent_np[t]),
+                            'bucket': 'pure_stable',
+                            'audio_mass_stable_dist': a_mass_s.tolist(), 
+                            'audio_mass_masked_dist': a_mass_m.tolist(),
+                            'audio_mass_delta': float(mass_shift.mean()),
+                            'jsd_stable_vs_masked': float(jsd_np[t]), # Changed idx to t
+                            'jsd_dist': jsd_np[t].tolist(),           # Changed idx to t
+                            'delta_entropy': float(masked_ent_np[t] - stable_ent_np[t]), # Changed idx to t
                         })
 
             seen_window_t = set()
@@ -668,9 +754,9 @@ class Server(object):
 
         return {
             'split_label':          split_label,
-            'mean_delta':           mean_delta,
-            'delta_by_offset':      {k: v for k, v in delta_by_offset.items()},
-            'mean_delta_by_offset': mean_delta_by_offset,
+            # 'mean_delta':           mean_delta,
+            # 'delta_by_offset':      {k: v for k, v in delta_by_offset.items()},
+            # 'mean_delta_by_offset': mean_delta_by_offset,
             'n_reint_events':       n_reint_events,
             'uar_stable':           uar_stable,
             'uar_masked':           uar_masked,

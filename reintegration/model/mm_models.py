@@ -557,5 +557,5 @@ class FuseBaseSelfAttention(nn.Module):
         pooled = torch.matmul(att, x)
         pooled = pooled.reshape(pooled.shape[0], self.d_head * self.d_hid)
         if return_attention:
-            return pooled, att
+            return pooled, att, a_len
         return pooled
