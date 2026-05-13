@@ -137,7 +137,8 @@ class SERClassifier(nn.Module):
         Utterance-level forward pass.
         Returns (preds, x_mm) — x_mm is consumed by SceneGRUWrapper.
         If return_fuse_attention and fuse_base fusion is active, returns
-        (preds, x_mm, fuse_att) where fuse_att is post-softmax weights (B, d_head, seq_len).
+        (preds, x_mm, fuse_att, a_len) where fuse_att is post-softmax weights (B, d_head, seq_len)
+        and a_len splits audio vs. text positions in the fused sequence.
         """
         fuse_att_out = None
         x_audio = self.audio_conv(x_audio)
@@ -343,6 +344,7 @@ class SceneGRUWrapper(nn.Module):
         Returns:
             embeddings: (1, T, utt_emb_dim)
             fuse_att_batch: if return_fuse_attention and fuse_base, (T, d_head, seq_len); else None
+            a_len_fuse: int | None — audio-side length in fused attention (fuse_base only); else None
         """
         T = len(x_a_scene)
 
@@ -383,26 +385,38 @@ class SceneGRUWrapper(nn.Module):
                     mask_b[t, :fb_len] = True
 
         enc_kw = dict(mask_a=mask_a, mask_b=mask_b)
+        fuse_att_batch = None
+        a_len_fuse = None
         if return_fuse_attention:
             enc_out = self.utterance_encoder(
                 x_a_batch, x_b_batch, len_a, len_b,
                 return_fuse_attention=True,
                 **enc_kw,
             )
-            if len(enc_out) == 3:
-                _, x_mm_batch, fuse_att_batch = enc_out
-            else:
+            if len(enc_out) == 4:
+                _, x_mm_batch, fuse_att_batch, a_len_fuse = enc_out
+            elif len(enc_out) == 2:
                 _, x_mm_batch = enc_out
-                fuse_att_batch = None
+            else:
+                raise ValueError(
+                    f"utterance_encoder unexpected return length {len(enc_out)} "
+                    f"with return_fuse_attention=True"
+                )
         else:
-            _, x_mm_batch = self.utterance_encoder(
+            enc_out = self.utterance_encoder(
                 x_a_batch, x_b_batch, len_a, len_b, **enc_kw,
             )
-            fuse_att_batch = None
+            if len(enc_out) == 2:
+                _, x_mm_batch = enc_out
+            else:
+                raise ValueError(
+                    f"utterance_encoder unexpected return length {len(enc_out)} "
+                    f"with return_fuse_attention=False"
+                )
         # x_mm_batch: (T, utt_emb_dim)
 
         embeddings = x_mm_batch.unsqueeze(0)   # (1, T, utt_emb_dim)
-        return embeddings, fuse_att_batch
+        return embeddings, fuse_att_batch, a_len_fuse
 
     def forward(
         self,
@@ -425,8 +439,9 @@ class SceneGRUWrapper(nn.Module):
             preds        : (T, num_classes) — per-utterance logits
             scene_hidden : (T, d_hid)       — GRU hidden states (for analysis)
             fuse_att     : (T, d_head, seq_len) or None — only if return_fuse_attention and fuse_base
+            a_len_fuse   : int | None — audio length index into fused attention (same as SERClassifier)
         """
-        embeddings, fuse_att_batch = self.encode_utterances(
+        embeddings, fuse_att_batch, a_len_fuse = self.encode_utterances(
             x_a_scene, x_b_scene, len_a_scene, len_b_scene,
             mask_scene, device,
             return_fuse_attention=return_fuse_attention,
@@ -453,7 +468,7 @@ class SceneGRUWrapper(nn.Module):
         preds = self.scene_classifier(scene_out)  # (T, num_classes)
 
         if return_fuse_attention:
-            return preds, scene_out, fuse_att_batch
+            return preds, scene_out, fuse_att_batch, a_len_fuse
         return preds, scene_out
 
 
