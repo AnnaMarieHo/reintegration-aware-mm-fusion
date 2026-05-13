@@ -447,7 +447,7 @@ class Server(object):
                         return_fuse_attention=True,
                     )
                 else:
-                    preds_stable, _ = self.global_model(
+                    preds_stable, _, _, stable_a_len_used = self.global_model(
                         scene_x_a, scene_x_b,
                         scene_len_a, scene_len_b,
                         ones_mask,
@@ -469,7 +469,7 @@ class Server(object):
                         return_fuse_attention=True,
                     )
                 else:
-                    preds_masked, _ = self.global_model(
+                    preds_masked, _, _, stable_a_len_used = self.global_model(
                         scene_x_a, scene_x_b,
                         scene_len_a, scene_len_b,
                         scene_mask,
