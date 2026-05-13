@@ -220,7 +220,7 @@ class SERClassifier(nn.Module):
                 x_mm_input  = torch.cat((x_audio, x_text), dim=1)
 
                 if return_fuse_attention:
-                    x_mm, fuse_att_out, _ = self.fuse_att(
+                    x_mm, fuse_att_out, a_len = self.fuse_att(
                         x_mm_input, len_a, len_t, a_len_this,
                         mask_a=mask_a_reduced, mask_b=mask_b_reduced,
                         return_attention=True,
@@ -242,7 +242,7 @@ class SERClassifier(nn.Module):
 
         preds = self.classifier(x_mm)
         if fuse_att_out is not None:
-            return preds, x_mm, fuse_att_out
+            return preds, x_mm, fuse_att_out, a_len
         return preds, x_mm
 
 
