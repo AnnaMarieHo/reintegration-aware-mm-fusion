@@ -531,6 +531,8 @@ class Server(object):
                         for offset in range(4):
                             idx = t + offset
                             if idx >= T: break 
+                            if offset > 0 and mask_np[idx] == 0:
+                                break
                             
                             # Re-calculate mass for the offset indices in the window
                             a_m_s_win, _ = calculate_modality_mass(stable_fuse_att_m[idx : idx + 1], a_len_this)
