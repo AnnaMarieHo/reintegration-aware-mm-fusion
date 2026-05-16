@@ -528,7 +528,7 @@ class Server(object):
                     is_reint_start = (t > 0 and mask_np[t - 1] == 0 and mask_np[t] == 1)
                     
                     if is_reint_start:
-                        for offset in range(3):
+                        for offset in range(4):
                             idx = t + offset
                             if idx >= T: break 
                             
