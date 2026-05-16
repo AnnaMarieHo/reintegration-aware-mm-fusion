@@ -516,6 +516,17 @@ class Server(object):
                 masked_ent_np = fuse_attention_entropy_per_timestep(masked_fuse_att_m)
                 jsd_np = calculate_jsd_per_timestep(stable_fuse_att_m, masked_fuse_att_m)
 
+                reint_window_indices = set()
+                for t in range(T):
+                    if t > 0 and mask_np[t - 1] == 0 and mask_np[t] == 1:
+                        for offset in range(4):
+                            idx = t + offset
+                            if idx >= T:
+                                break
+                            if offset > 0 and mask_np[idx] == 0:
+                                break
+                            reint_window_indices.add(idx)
+
                 for t in range(T):
                     if mask_np[t] != 1 or a_len_this is None:
                         continue
@@ -554,7 +565,7 @@ class Server(object):
                                     'delta_entropy': float(masked_ent_np[idx] - stable_ent_np[idx]),
                                 })
                     
-                    elif t == 0 or mask_np[t-1] == 1:
+                    elif t not in reint_window_indices and (t == 0 or mask_np[t-1] == 1):
                         fuse_ent_stable.append(float(stable_ent_np[t]))
                         if fuse_timestep_detail is not None:
                             fuse_timestep_detail.append({
