@@ -9,3 +9,8 @@ reintegration/output/partition/iemocap/
 reintegration/output/partition/meld/
 reintegration/IEMOCAP/
 env/
+reintegration/output/partition/holdout_ses_*/
+masters_venv/
+__pycache__/
+reintegration/trained_models/
+reintegration/output/eval_results

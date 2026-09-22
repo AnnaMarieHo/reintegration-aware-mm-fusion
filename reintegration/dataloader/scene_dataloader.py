@@ -14,9 +14,49 @@ Yielded batch per scene (batch_size always 1):
 
 import torch
 import numpy as np
-
+import hashlib
 from torch.utils.data import Dataset, DataLoader
 
+
+def generate_block_mask(
+    scene_len: int,
+    block_length: int = 5,
+    n_blocks: int = 1,
+    min_gap: int = 2,
+    seed: int = 0,
+) -> np.ndarray:
+    """
+    Insert n_blocks non-overlapping absence runs of exactly block_length.
+    Rest of scene stays present (1).
+    """
+    rng = np.random.default_rng(seed)
+    mask = np.ones(scene_len, dtype=np.int64)
+    if scene_len < block_length:
+        return mask  # scene too short; skip
+
+    forbidden = set()
+    placed = 0
+    attempts = 0
+    max_attempts = 500
+
+    while placed < n_blocks and attempts < max_attempts:
+        attempts += 1
+        if scene_len < block_length:
+            break
+        start = int(rng.integers(0, scene_len - block_length + 1))
+        block = set(range(start, start + block_length))
+        gap_before = set(range(max(0, start - min_gap), start))
+        gap_after = set(range(start + block_length, min(scene_len, start + block_length + min_gap)))
+
+        if block & forbidden:
+            continue
+
+        for t in block:
+            mask[t] = 0
+        forbidden |= block | gap_before | gap_after
+        placed += 1
+
+    return mask
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Markov mask generator
@@ -52,7 +92,9 @@ def generate_markov_mask(
 
 def scene_id_to_seed(scene_id: str) -> int:
     """Stable integer seed from scene id string, e.g. 'dia64' → int."""
-    return abs(hash(scene_id)) % (2**31)
+    return int(hashlib.md5(scene_id.encode()).hexdigest(), 16) % (2**31)
+
+    # return abs(hash(scene_id)) % (2**31)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,8 +149,15 @@ class SceneDataset(Dataset):
         mask_seed = scene_id_to_seed(scene_id)
 
         if self.apply_mask:
-            mask_np = generate_markov_mask(
-                T, self.p_stay_absent, self.p_stay_present, seed=mask_seed
+            # mask_np = generate_markov_mask(
+            #     T, self.p_stay_absent, self.p_stay_present, seed=mask_seed
+            # )
+            mask_np = generate_block_mask(
+                T,
+                block_length=9,
+                n_blocks=1,      # start with 1 block per scene
+                min_gap=2,
+                seed=mask_seed,
             )
         else:
             mask_np = np.ones(T, dtype=np.int64)

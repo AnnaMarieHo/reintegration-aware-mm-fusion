@@ -1,0 +1,476 @@
+
+\documentclass{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath} 
+\usepackage{amssymb} 
+\usepackage{amsthm}  
+\usepackage{array}
+\usepackage{makecell}
+\usepackage{geometry} 
+\usepackage{multicol}
+\usepackage{titlesec}
+\usepackage{amsthm}
+\usepackage{algorithm}
+\usepackage{float}
+\usepackage{algpseudocode}
+\usepackage{parskip}
+\usepackage{tikz}
+\usetikzlibrary{positioning, fit, backgrounds, arrows.meta}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{caption} 
+\captionsetup[table]{skip=10pt} 
+\geometry{a4paper, margin=1in}
+\title{Reintegration-Aware Multimodal Fusion under Temporally Correlated Missingness}
+\begin{document}
+\maketitle
+
+
+
+\titleformat{\section}{\normalfont\normalsize\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalfont\normalsize\bfseries}{\thesubsection}{1em}{}
+\titlespacing*{\subsection}{0pt}{8pt}{4pt}
+\begin{abstract}
+
+In this work, we study temporally correlated modality availability at the intra-sequence level and ask whether reintegration events (\textsc{off} $\rightarrow$ \textsc{on}) produce measurable behavioral effects in stateful multimodal models. We extend FedMultimodal's utterance classifier (\texttt{SERclassifier}) using a scene-level GRU architecture under simulated Markov missingness on the IEMOCAP conversational dataset. Under stochastic client participation, we evaluate post-return reintegration using macro UAR restricted to reintegration-window timesteps ($\Delta\text{UAR}_{\text{win}}$). We additionally evaluate model belief shift using soft metrics including KL Divergence and argmax disagreement. Intermittent masking of the more decision-relevant text stream causes larger belief shifts (KL Divergence/argmax disagreement) and higher average $\Delta\text{UAR}_{\text{win}}$ than intermittent audio masking under multimodal training (where text can compensate and belief shift is typically small or near zero). Training with zeroed audio forces reliance on text and amplifies text-dropout effects at inference, which suggests model dependence on the returning stream. Effect sizes vary substantially across federated folds and held-out sessions. We find that post-return stable-vs. masked gaps are directionally consistent, motivating intervention when redundancy cannot be assumed.
+
+\end{abstract}
+
+\section{Introduction}
+
+Multimodal federated learning (MMFL) systems increasingly operate under incomplete and heterogeneous modality availability. These challenges are amplified by heterogeneity across clients and privacy constraints on data sharing. Recent MMFL methods address this missingness by learning robust fusion mechanisms that recover task accuracy under various incompleteness patterns. Because of this, prior multimodal fusion methods rely primarily on content-derived signals to optimize models based on final task accuracy under incomplete inputs. Less attention has been paid to model behavior at modality reintegration boundaries where a previously absent modality returns within an ongoing sequence. Therefore, temporal dynamics of modality availability remain underexplored, while scenarios where modalities disappear and reappear within a sequence could benefit from further characterization.
+
+We consider non-monotone, temporally correlated modality missingness, where modality availability exhibits bursty persistence rather than independent per-timestep masking within a local temporal sequence. In short, modality availability is treated as an exogenous process independent of semantic content allowing us to ask the basic question:
+
+Does modality reintegration under temporally correlated missingness measurably affect model behavior, and if so, can this behavior be regulated?
+
+\section{Related Work}
+
+A growing body of work in multimodal federated learning (MMFL) addresses the challenge of incomplete modality availability by learning fusion strategies that remain robust when subsets of modalities are absent. Representative approaches include FedInMM, which introduces multi-granularity temporal modeling to extract complementary information from incomplete multimodal data and demonstrates improved average task accuracy across varying levels of missingness (Zhang et al., 2024). Other MMFL methods mitigate missing modalities through prototype alignment (e.g., PmcmFL; Li et al., 2023), hierarchical aggregation or distillation (Yuan et al., 2024; Chen et al., 2025), and diffusion-based recovery mechanisms for missing modalities in dialogue emotion recognition (Liu et al., 2025). Medical and mobile sensing settings have similarly explored arbitrary or non-IID modality absence using robust aggregation or prototype learning (e.g., FedAMM; Wang et al., 2025; FedMobile; Zhao et al., 2025). Related work on correlated availability in federated learning has focused on client-round participation patterns and their effects on convergence and bias (e.g., intermittent or Markovian client availability; Yang et al., 2022; Chen et al., 2024), rather than on modality-level availability dynamics within a client’s local temporal sequence.
+
+Across both federated and centralized multimodal learning, standard evaluation protocols largely smooth out transient reintegration effects. This leaves these dynamics underexplored rather than intentionally excluded, due to many MMFL works assuming either static missingness patterns or independent per-timestep masking. 
+
+\section{Dataset and Partitioning}
+
+IEMOCAP \cite{busso2008iemocap} is a multimodal affective dataset comprising ten hours of dyadic interactions between five pairs of actors across ten sessions (one session per speaker pair). Each session contains both scripted and improvised scenarios, yielding 10,038 utterances annotated with categorical emotion labels. We retain all six categories: \textit{angry}, \textit{happy}, \textit{sad}, \textit{neutral}, \textit{excited}, and \textit{frustrated}.
+
+\vspace*{10pt}
+\subsection{Scene Construction}
+We construct scenes by grouping contiguous utterances within individual speaker interactions, ensuring emotional and conversational coherence. This boundary-respecting approach yields 737 total scenes. To maintain a balance between dataset scale and the requirements of our temporal masking model, we cap scene length at 15 utterances (mean $\approx$ 14.0, median 15). This threshold provides sufficient temporal depth to simulate Markov missingness patterns while preserving a reasonable volume of training samples.
+
+\paragraph{Train and Dev Splits:} The train set ranges from 500 - 531 scenes varying by selected sessions, while the dev set is randomly sampled from train interactions and held out from the train set. A single session is selected for testing and held out from training entirely. This ensures that testing is preformed on a speaker-independent evaluation. 
+
+
+\begin{table}[ht]
+\centering
+\label{tab:iemocap-partitions}
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Holdout} & \textbf{Train} & \textbf{Train} & \textbf{Dev} & \textbf{Dev} & \textbf{Test} & \textbf{Test} \\
+\textbf{session} & \textbf{scenes} & \textbf{utts} & \textbf{scenes} & \textbf{utts} & \textbf{scenes} & \textbf{utts} \\
+\midrule
+Session 1 (Ses01F/M) & 529 & 6{,}867 & 83 & 1{,}163 & 127 & 1{,}764 \\
+Session 2 (Ses02F/M) & 531 & 6{,}896 & 80 & 1{,}127 & 128 & 1{,}771 \\
+Session 3 (Ses03F/M) & 500 & 6{,}461 & 88 & 1{,}244 & 150 & 2{,}089 \\
+Session 4 (Ses04F/M) & 505 & 6{,}547 & 85 & 1{,}195 & 144 & 2{,}052 \\
+Session 5 (Ses05F/M) & 502 & 6{,}510 & 82 & 1{,}166 & 153 & 2{,}118 \\
+\bottomrule
+\end{tabular}
+\caption{IEMOCAP partition statistics per holdout session.
+         Each session holds out one speaker pair for testing;
+         the remaining 8 speakers are distributed across
+         train and dev splits.}
+\end{table}
+
+\vspace*{10pt}
+\subsection{Client Partitioning \& Holdout}
+Scenes are partitioned by session speaker across 8 train clients. We evaluated results under a Leave-One-Subject-Out Cross-Validation (LOSO) assignment strategy, where two speakers belonging to a single session, are rotated across sessions and treated as holdout not included in training. Concretely, five holdout variations are evaluated where sessions 1 - 5 are rotated as the held out test set. While this approach introduces higher-fold-to-fold variability, it provides an estimate of session-level generalization. The sampling distribution of the train sets exhibited notable variation across portioning strategies due to dev sampling and speaker representation. Likewise, the label distribution across held out test sets exhibit significant variation.
+
+\begin{figure}[H]
+    \centering
+    \makebox[\textwidth][c]{%
+        \includegraphics[width=1.25\textwidth]{iemocap_speaker_distribution.png}%
+    }
+    \caption{Speaker distributions vary based on each held out session since withheld pairs are rotated. As illustrated in holdout Ses03, Ses05 is notably lower in train because more Ses05 data moved to dev}
+    \label{fig:iemocap_speaker_distribution}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{test_emotions_stacked_fractions.png}
+    \caption{Holdout label distribution: Label distributions for each hold out set exhibited high variation} 
+    \label{fig:test_emotions_stacked_fractions} 
+\end{figure}
+
+\section{Markov Missingness}
+Audio availability is modeled as a two-state first-order Markov chain, where at each utterance timestep the audio modality is either present or absent. Transitions are governed by two parameters: $P(\text{present} \to \text{present}) = 0.75$ and $P(\text{absent} \to \text{absent}) = 0.70$. A reintegration event is defined as the transition from absent to present, i.e. $\text{mask}[t-1]=0$ and $\text{mask}[t]=1$. This formulation produces bursty dropout behavior, where absence periods cluster into runs rather than occurring independently per utterance. This is a more realistic model of real-world device or connectivity failures than i.i.d. Bernoulli masking.
+
+The parameters were selected empirically via a sweep over $P(\text{absent} \to \text{absent}) \in \{0.5, 0.6, 0.7, 0.8, 0.9\}$ with $P(\text{present} \to \text{present})$ held at $0.75$, using three criteria:
+
+\begin{itemize}
+	\item At least $10\%$of scenes must contain at least one reintegration event;
+	\item The mean position of the first reintegration event must fall within the scene boundary; and
+	\item The mask should appear visually bursty rather than near-i.i.d.
+\end{itemize}
+
+$P(\text{absent} \to \text{absent}) = 0.70$ is the highest value satisfying all three. At $0.80$ or above, absence runs become so long that many scenes contain no reintegration event at all, eliminating the training signal. At the chosen values, the expected absent run length is $1 / (1 - 0.70) \approx 3.3$ utterances and the expected present run length is $1 / (1 - 0.75) = 4.0$ utterances, placing the stationary probability of audio availability at approximately $54.5\%$.
+
+The scene size of 15 utterances is directly motivated by these dynamics. One full absence–presence cycle spans approximately 7.3 utterances on average, so a 15-utterance scene accommodates roughly two such cycles and typically contains one to two reintegration events. Crucially, the first reintegration event tends to occur around utterance 4–7, leaving 8–11 subsequent utterances of post-reintegration context within the same scene. This post-event context allows the scene GRU to accumulate hidden state across utterances, enabling the model to learn recovery dynamics following reintegration. Scenes shorter than roughly 10 utterances would frequently contain no reintegration event, or would place the event at the final timestep, rendering the recovery signal unobservable. Each mask is generated with a seed fixed to the scene identifier,  ensuring reproducibility so that scenes presents the same missingness pattern across runs.
+
+
+\section{Model Architecture}
+\paragraph{Utterance-level encoder.}
+We extend FedMultimodal's \texttt{SERClassifier} temporally, by wrapping it with a \texttt{SceneGRUWrapper}. Each utterance is processed independently by \texttt{SERClassifier}, which encodes audio and text in parallel before fusing them. When audio is permanently masked, the audio frames are zeroed prior to the convolution encoder, so the attention module receives a degraded audio representation while text remains fully intact. Audio features (39-dimensional MFCCs) are first passed through a three-layer \texttt{Conv1dEncoder}, consisting of stacked \texttt{Conv1d--ReLU--MaxPool} blocks with filter sizes 32, 64, and 128 respectively. These extract local frame-level patterns and downsample the sequence by a factor of eight. 
+The resulting frame/utterance sequence is then encoded by a unidirectional GRU (\texttt{audio\_rnn}) with hidden size $d_\text{hid}$=128, producing a variable-length sequence of hidden states. Text embeddings (MobileBERT features of dimension 768) are processed in parallel by a separate unidirectional GRU (\texttt{text\_rnn}) of the same hidden size. The two resulting sequences are concatenated to form a joint audio-text sequence of shape $(T_a + T_b,\, d_\text{hid}*d_\text{head})$, which is then passed to the cross-modal fusion attention module. 
+
+\paragraph{Cross-modal fusion attention (\texttt{fuse\_base}).}
+The fused sequence is processed by \texttt{FuseBaseSelfAttention}, a multi-head pooling mechanism that computes $d_\text{head}$ soft attention distributions over the joint audio-text sequence. Specifically, the sequence is projected through a two-layer feed-forward network ($d_\text{hid} \to 512 \to d_\text{head}$, with Tanh activation) to produce an attention score matrix of shape $(d_\text{head},\, T_a + T_b)$. Each attention head independently performs a softmax-weighted sum over the sequence, yielding $d_\text{head}$ context vectors of dimension $d_\text{hid}$, which are concatenated to form a fixed-size utterance embedding (\texttt{x\_mm}) of dimension $d_\text{head} \cdot d_\text{hid}$. A two-layer MLP (Linear$\to$ReLU$\to$Dropout$\to$Linear) then maps (\texttt{x\_mm}) to per-class logits. All reported experiments use $d_\text{hid} = 128$, $d_\text{head} = 6$, yielding a 768-dimensional utterance embedding.
+
+% ---------------------------------------------------------------
+%  Architecture diagram: SERClassifier + SceneGRUWrapper
+% ---------------------------------------------------------------
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    %% node styles
+    input/.style={
+        draw, fill=teal!15, rounded corners=4pt,
+        minimum width=3cm, minimum height=1cm,
+        font=\small, align=center
+    },
+    encblock/.style={
+        draw, fill=violet!12, rounded corners=4pt,
+        minimum width=4cm, minimum height=1.2cm,
+        font=\small, align=center
+    },
+    emb/.style={
+        draw, fill=orange!20, rounded corners=4pt,
+        minimum width=2.8cm, minimum height=0.65cm,
+        font=\small\bfseries, align=center
+    },
+    sceneblock/.style={
+        draw, fill=blue!12, rounded corners=4pt,
+        minimum width=3.2cm, minimum height=1.4cm,
+        font=\small, align=center
+    },
+    predblock/.style={
+        draw, fill=yellow!20, rounded corners=4pt,
+        minimum width=3.2cm, minimum height=0.65cm,
+        font=\small, align=center
+    },
+    lossblock/.style={
+        draw, fill=red!15, rounded corners=4pt,
+        minimum width=3.2cm, minimum height=0.65cm,
+        font=\small, align=center
+    },
+    bypass/.style={
+        draw=gray!50, dashed, rounded corners=4pt,
+        minimum width=3.2cm, minimum height=0.55cm,
+        font=\small\color{gray}, align=center
+    },
+    container/.style={
+        draw=gray!60, dashed, rounded corners=6pt,
+        inner sep=8pt
+    },
+    %% arrow styles
+    arr/.style={-{Stealth[length=5pt]}, thick},
+    backprop/.style={-{Stealth[length=5pt]}, dashed, gray, thick},
+    mask/.style={-{Stealth[length=5pt]}, dotted, gray!70},
+    recur/.style={-{Stealth[length=5pt]}, dashed, gray!80},
+]
+
+%% ─────────────────────────────────────────────
+%%  INPUTS  (left column)
+%% ─────────────────────────────────────────────
+\node[input] (audio)  {Audio frames\\$\mathbf{x}_a \in \mathbb{R}^{T_a \times D_a}$};
+\node[input, below=0.6cm of audio] (text)  {Text tokens\\$\mathbf{x}_b \in \mathbb{R}^{T_b \times D_b}$};
+\node[input, below=0.6cm of text,  fill=gray!12] (mask)  {Zeros Mask\\$m \in \{0,1\}^{T}$};
+
+%% ─────────────────────────────────────────────
+%%  SERClassifier  (centre-left column)
+%% ─────────────────────────────────────────────
+\node [encblock, right=1.2cm of audio.east, anchor=west, yshift=-0.0cm] (conv) {Conv1dEncoder \\ 3 $\times$ Conv1d + MaxPool};
+
+
+\node [encblock, text width=1.4cm, minimum width=0pt, inner xsep=2pt, below=0.8cm of conv, xshift=-0.9cm] (trnn) {text\_rnn\\(GRU)};
+\node [encblock, text width=1.4cm, minimum width=0pt, inner xsep=2pt, below=0.8cm of conv, xshift=+0.9cm] (arnn) {audio\_rnn\\(GRU)};
+
+\node [encblock, below=2.6cm of conv] (att) {Attention / fuse \\ (fuse\_base $|$ base $|$ mhd)};
+\node[emb,      below=0.6cm of att]                  (xmm)  {$\mathbf{x}_\text{mm} \in \mathbb{R}^{d}$\\embedded utterances};
+\node[bypass,   below=0.45cm of xmm]                 (uclf) {utterance classifier\\(bypassed in wrapper)};
+
+%% SER container box
+\begin{scope}[on background layer]
+  \node[container, fit=(conv)(arnn)(trnn)(att)(xmm)(uclf),
+        label={[font=\footnotesize\itshape]above:SERClassifier (utterance encoder)}] (SER) {};
+\end{scope}
+
+%% SER internal arrows 
+\draw[arr] (conv.south) -- ++(0,-0.35) -| (arnn.north);
+\draw[arr] (arnn.south) -- ++(0,-0.3) -| (att.north);
+\draw[arr] (trnn.south) -- ++(0,-0.3) -| (att.north);
+\draw[arr] (att)  -- (xmm);
+\draw[arr, gray!50] (xmm) -- (uclf);
+
+%% Input → SER arrows
+\draw [arr] (audio.east) -- ++(0.8,0) |- (conv.west);
+\draw [arr] (text.east) -- ++(0.5,0) |- (trnn.west);
+\draw[mask](mask.east)   -- ++(0.6,0) |- (att.west);
+
+\node[font=\footnotesize\itshape, rotate=90, gray]
+      at ([xshift=-0.7cm]SER.west) {batched $T$ utterances};
+
+%% ─────────────────────────────────────────────
+%%  SceneGRUWrapper  (right column)
+%% ─────────────────────────────────────────────
+\node[sceneblock, right=2cm of conv, yshift=-0.1cm] (sgru)
+      {scene\_gru\\causal GRU, hidden $h_t$};
+\node[sceneblock, below=0.6cm of sgru] (shid)
+      {scene\_hidden $\in \mathbb{R}^{T \times d_\text{hid}}$};
+\node[predblock, below=0.6cm of shid] (sclf)
+      {scene\_classifier\\Linear $\to$ $C$ classes};
+\node[predblock, below=0.6cm of sclf] (preds)
+      {preds (logits)\\$\in \mathbb{R}^{T \times C}$};
+\node[lossblock, below=0.6cm of preds] (loss)
+      {Cross-entropy loss\\per-utterance labels};
+
+%% Wrapper container box
+\begin{scope}[on background layer]
+  \node[container, fit=(sgru)(shid)(sclf)(preds)(loss),
+        label={[font=\footnotesize\itshape]above:SceneGRUWrapper (scene encoder)}] (WRAP) {};
+\end{scope}
+
+%% Wrapper internal arrows
+\draw[arr] (sgru)  -- (shid);
+\draw[arr] (shid)  -- (sclf);
+\draw[arr] (sclf)  -- (preds);
+\draw[arr] (preds) -- (loss);
+
+\draw[recur] (sgru.east) -- ++(1.2,0) -- ++(0,-2) -- ++(-0.8,0)
+      node[font=\footnotesize\itshape, right=1pt, yshift=10pt] {$h_{t-1}$};
+
+\draw[arr] (xmm.east) -- ++(1.5,0)
+           node[font=\scriptsize, above=2pt, pos=0.55]
+                {$\in \mathbb{R}^{1 \times T \times d}$}
+           |- (sgru.west);
+
+%% ─────────────────────────────────────────────
+%%  Backprop arrow 
+%% ─────────────────────────────────────────────
+\draw[backprop]
+    (loss.south) -- ++(0,-1.6)
+    -| node[font=\footnotesize\itshape, below=3pt, pos=0.22]
+         {backprop — joint optimizer step}
+    (SER.south);
+
+\end{tikzpicture}
+\caption{End-to-end computation graph of \texttt{SceneGRUWrapper}.
+Audio and text inputs for all $T$ utterances in a scene are batched and
+encoded by \texttt{SERClassifier}, yielding a sequence of utterance
+embeddings $\mathbf{x}_\text{mm}$.
+The scene GRU consumes this sequence causally, threading hidden state
+$h_t$ across utterances to capture cross-utterance context.
+Per-timestep logits are produced by the scene classifier and
+optimised with cross-entropy loss.
+A single optimizer step updates parameters in both modules jointly.}
+\label{fig:architecture}
+\end{figure}
+
+\vspace*{10pt}
+\subsubsection{Scene-Level Temporal Wrapper}
+A scene-level wrapper (\texttt{SceneGRUWrapper}) is trained jointly with the \texttt{SERClassifier}. This additional GRU introduces cross-utterance memory by passing the \texttt{SERClassifier's} output sequence of utterance embeddings through a second unidirectional  GRU with hidden size $d_\text{hid}$=128 (set via \texttt{--hid\_size}; default in code is 64). Loss is computed from the wrapper’s final per-utterance logits while backpropogation goes through \texttt{SceneGRUWrapper} and into \texttt{SERClassifier}. Concretely, the optimizer updates both \texttt{SceneGRUWrapper} and \texttt{SERClassifier} in one step, while loss on the the wrapper backpropogates through \texttt{SceneGRUWrapper}, into the encoder (\texttt{SERClassifier}) up to \texttt{x\_mm}. The \texttt{SceneGRUWrapper} is called without an explicit initial state so ($h_\text{0}$=0) is zero-initialized for each scene forward pass. This enables the model's hidden state to evolve across time steps and carry context between scenes without leakage.
+
+Given a scene of $T$ utterances, all $T$ embeddings $\{\mathbf{x}_\text{mm}^{(t)}\}_{t=0}^{T-1}$ are first produced in a single batched forward pass of \texttt{SERClassifier}, then arranged into a sequence of shape $(1, T, d_\text{emb})$ and fed to \texttt{SceneGRUWrapper}. At each timestep $t$, the GRU updates its hidden state:
+%
+\begin{equation}
+    \mathbf{h}_t = \text{GRU}\!\left(\mathbf{x}_\text{mm}^{(t)},\, 
+    \mathbf{h}_{t-1}\right),
+\end{equation}
+%
+A linear classification head produces per-utterance logits $\hat{\mathbf{y}}_t = W\mathbf{h}_t$. The \texttt{SceneGRUWrapper} is strictly unidirectional (causal), so that $\mathbf{h}_{t-1}$ cannot attend to future utterances. This is an intentional design choice aimed at reflecting realistic deployment conditions in which a federated client cannot anticipate future audio availability, and it ensures that the reintegration dip is a genuine consequence of accumulated absence history rather than an artifact of bidirectional look-ahead.
+
+
+
+\vspace*{10pt}
+\subsubsection{Temporal State and Reintegration Boundaries}
+
+The \texttt{SceneGRUWrapper} introduces temporal statefulness that distinguishes this architecture from static utterance-level classification. The hidden state $\mathbf{h}_t$ accumulates cross-utterance context, enabling the model to condition predictions on conversational history. This temporal structure creates meaningful \emph{reintegration boundaries} with timesteps where a previously absent modality returns within an ongoing sequence.
+
+Concretely, when audio is absent at utterance $t$, zeroed frames yield a degraded 
+embedding $\mathbf{x}_\text{mm}^{(t)}$. The GRU state $\mathbf{h}_t$ evolves based on this degraded input, carrying availability history forward. At reintegration timestep $t_r$, where audio transitions from absent to present, the utterance encoder receives complete audio embeddings, while $\mathbf{h}_{r-1}$ encodes the preceding absence period. This defines a state transition in the temporal model, where the hidden state must incorporate complete multimodal information after a run of degraded inputs. The causal, unidirectional design ensures that any reintegration effects are genuine temporal phenomena rather than artifacts of bidirectional lookahead.
+
+\vspace*{10pt}
+\subsection{Training and Evaluation Conditions}
+\paragraph{Experimental Setup: }
+Experiments were conducted on the University of Kentucky Lipscomb Compute Cluster (LCC) using NVIDIA V100 GPUs (16GB/32GB VRAM). The compute nodes consisted of Intel Skylake and Cascade Lake architectures with 192GB of system RAM, managed via the SLURM workload manager. 
+
+\paragraph{Implementation Details: } All models were trained for 60 epochs using the Federated Averaging (\texttt{FedAvg}) algorithm. We employed a local epoch count of 1 and a client sampling rate of 0.5. Model weights are randomly initialized for each fold. The architecture utilized a hidden size of 128 and a learning rate of 0.01 with a batch size of 16. Optimization was performed using \texttt{torch.optim.SGD} (for both fed\_avg and sever trainers) with multimodal inputs consisting of 39-dimensional MFCCs for audio and MobileBERT features for text. The variation of client participation ensured distinct FL model trajectories per run, allowing us to quantify training variance for each held out set. 
+
+\paragraph{Training Strategies:}
+We utilize three distinct training regimes to establish baseline modality dependencies. These strategies determine the information available to the model during the optimization phase:
+\begin{itemize}
+\item \textbf{Fully Multimodal:} Models are trained on both audio and text modalities concurrently.
+\item \textbf{Audio-Deprived:} Audio features are zeroed entirely during training ($P(a \to a) = 1.0$), forcing the model to rely solely on text.
+\item \textbf{Text-Deprived:} Text embeddings are zeroed entirely, forcing reliance on the audio stream.
+\end{itemize} 
+
+\paragraph{Inference-Time Masking:}
+To characterize multimodal reintegration behavior and quantify "instability," we apply scene-specific Markov masks during evaluation. In these conditions, frames of a specific modality are zeroed at absent timesteps according to the Markov process, while the alternate (backup) modality remains live and intact throughout. This allows us to measure the degradation attributable to the sudden absence of a primary modality against a consistently available backup.
+
+\paragraph{Experimental Conditions:}
+By crossing these training strategies with specific inference masks, we arrive at four experimental conditions (Table~\ref{tab:experimental_conditions_simple}). These conditions quantify the influence of a redundant backup modality regardless of its individual discriminative power.
+
+\begin{table}[H]
+\centering
+\caption{Experimental Training and Inference Masking Conditions}
+\label{tab:experimental_conditions_simple}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Condition} & \textbf{Training} & \textbf{Inference Masking } \\ \midrule
+Text-Only (M)  & Audio-Deprived & Text masked. \\
+Multimodal (TM) & Fully Multimodal & Text masked. \\
+Multimodal (AM) & Fully Multimodal & Audio masked.\\
+Audio-Only (M) & Text Deprived &  Audio masked. \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Evaluation Metrics}
+\paragraph{$\Delta\text{UAR}$ Window.}
+
+For each inference condition, we compare the \textit{stable} UAR (both modalities present) against the \textit{masked} UAR to calculate the $\Delta$UAR for a window of three timesteps following a reintegration event. Because UAR averages recall uniformly across classes, it reduces dominance by majority classes and provides a class-balanced view of performance.
+
+The reintegration effect is quantified by:
+\begin{equation}
+    \Delta\text{UAR} = \text{UAR}_\text{stable}^{(t_r)} - \text{UAR}_\text{masked}^{(t_r)}
+\end{equation}
+where $\text{UAR}_\text{stable}^{(t_r)}$ and $\text{UAR}_\text{masked}^{(t_r)}$ are the unweighted average recalls at the reintegration timestep $t_r$ under the stable and masked conditions respectively. For each inference run, $\Delta\text{UAR}$ represents the macro recall over timesteps that belong to post-return windows in the holdout split. 
+
+ Specifically, $\Delta\text{UAR}$ serves as the overall performance measurement for masked-vs-stable degradation, allowing us to quantify whether accuracy is degraded immediately after modality reintegration. A positive $\Delta\text{UAR}$ indicates that the stable condition outperforms the masked condition at $t_r$. A negative $\Delta\text{UAR}$ would indicate that the masked condition unexpectedly outperforms stable, suggesting the model has not learned to use the returning modality effectively. 
+
+\paragraph{KL Divergence.}
+We additionally compute the forward KL divergence between the highest performing model's stable and masked conditions. This is used to capture uncertainty across all predicted classes rather than only at $y^*$. Concretely, we utilize the model's prediction distribution under both conditions at each timestep, to identify broader distributional shifts at timesteps following a reintegration event. The total distributional shift induced by masking context is quantified in nats. 
+
+
+$$D_{\text{KL}}\!\left(P_{\text{stable}} \,\|\, P_{\text{masked}}\right)(t_k) = \sum_{c} P_{\text{stable}}(c \mid \mathbf{x}_{t_k}) \log \frac{P_{\text{stable}}(c \mid \mathbf{x}_{t_k})}{P_{\text{masked}}(c \mid \mathbf{x}_{t_k})}$$
+
+Which expands from the log-softmax representations as:
+
+$$D_{\text{KL}}\!\left(P_{\text{stable}} \,\|\, P_{\text{masked}}\right)(t_k) = \sum_{c} P_{\text{stable}}(c \mid \mathbf{x}_{t_k}) \left[\log P_{\text{stable}}(c \mid \mathbf{x}_{t_k}) - \log P_{\text{masked}}(c \mid \mathbf{x}_{t_k})\right]$$
+
+Where $c$ indexes all classes. 
+
+
+\paragraph{Argmax Disagreement Rate}
+We quantify the disagreement between model masking conditions using as a binary indicator of whether the stable and masked-context models produce different argmax predictions at timestep $t_k$. These are averaged across post reintegration windows, to provide the proportion of timesteps at which masking causes a change in the model's top prediction.
+
+$$\text{Disagree}(t_k) = \mathbf{1}\!\left[\hat{y}_{\text{stable}}(t_k) \neq \hat{y}_{\text{masked}}(t_k)\right]$$
+
+$\hat{y}_{\text{stable}}(t_k) = \arg\max_c \, P_{\text{stable}}(c \mid \mathbf{x}_{t_k})$ and $\hat{y}_{\text{masked}}(t_k) = \arg\max_c \, P_{\text{masked}}(c \mid \mathbf{x}_{t_k})$
+
+
+\vspace{10pt}
+\section{Results}
+\subsection{Overview and Reporting Approach}
+Results are reported across five held-out sessions (sessions 1--5 rotated as test), each evaluated over five federated folds under stochastic client sampling. We report per-session means and ranges across folds. High fold-to-fold variance reflects FL client subsampling, session-specific emotion distributions (See Figures \ref{fig:iemocap_speaker_distribution}, \ref{fig:test_emotions_stacked_fractions}), and the sensitivity of macro UAR to class composition in short post-reintegration windows. Window UAR provides a task-aligned sanity check, where effects are often positive on average but high variance, consistent with federated optimization stochasticity and macro-recall sensitivity under class imbalance.
+
+
+\paragraph{Final model performance: }Final model performance is reported in Table \ref{tab:uar_summary}. Across six emotion classes, the stable multimodal model attains a macro UAR of ~51\%, (above chance UAR 16.7\%). We therefore interpret $\Delta{UAR}_{win}$ as a within-model sensitivity measure rather than a standalone indicator of peak classification performance
+
+\begin{table}[H]
+\centering
+\caption{UAR Performance across Conditions (Mean $\pm$ SD)}
+\label{tab:uar_summary}
+\begin{tabular}{lccc}
+\toprule
+Condition & Stable UAR & Masked UAR & $\Delta\text{UAR}_\text{win}$\\
+\midrule
+Multimodal (AM) & 51.09 $\pm$ 2.23 & 48.15 $\pm$ 2.60 & 1.09 $\pm$ 0.94 \\
+Audio Only (AM) & 32.74 $\pm$ 2.49 & 25.71 $\pm$ 1.80 & 1.88 $\pm$ 1.41 \\
+\midrule
+Multimodal (TM) & 51.08 $\pm$ 2.15 & 45.12 $\pm$ 2.31 & 3.53 $\pm$ 1.70 \\
+Text Only (TM) & 47.16 $\pm$ 2.63 & 39.23 $\pm$ 2.79 & 5.38 $\pm$ 1.84 \\
+\bottomrule
+\end{tabular}
+\caption{UAR summary across conditions (mean $\pm$ SD over held-out sessions and federated folds). Stable and masked UAR report global macro recall under each condition. $\Delta{UAR}_{win}$ is computed over post-reintegration timesteps only and therefore is not equal to the difference between global stable and masked UAR }
+\end{table}
+
+\section{Belief Shift}
+
+We report belief-shift metrics over a three-timestep window (+0 to +2). This length aims to balance capturing immediate post-reintegration dynamics with maintaining representative samples. At +2, approximately 46\% of reintegration events remain in the window (mean n$\approx$98). The decay pattern is already substantial by +2, as KL divergence decreases by approximately 70\% from its +0 value, indicating the reintegration effect may be strongly localized to the boundary. 
+
+
+\begin{table}[ht]
+\centering
+
+\setcellgapes{4pt} 
+\makegapedcells    
+\label{tab:recovery_curves}
+\begin{tabular}{lccccc}
+\toprule
+ & $+0$ & $+1$ & $+2$ \\
+\midrule
+\texttt{($+0$) Percent Retained} & 100.0\% & 67.8 \% & 46.3\% \\
+
+Text Mask Audio Live & 214 & 145 & 99 \\
+\midrule
+\texttt{($+0$) Percent Retained} & 100.0\% & 70.5 \% & 48.5\% \\
+
+Audio Mask Text Live & 200 & 141 & 97 \\
+\bottomrule
+\end{tabular}
+\caption{Sample counts per condition at each reintegration offset are uniform across all folds with one, two, and three timesteps respectively. The \texttt{Percent Retained} describes the percentage of events that remain present as timesteps progress.}
+\end{table}
+
+
+Concretely, $+0$ represents the number of reintegration points where $\texttt{mask}_{t-1} \texttt{= 0}$ and $\texttt{mask}_{t} \texttt{= 1}$. $+1$ and  $+2$ denote the second and third timesteps following the point of reintegration. Offset $+0$ is based on 200-214 events and provides the most reliable estimate (\%100 of events). Later offsets ($+1$, $+2$) reflect only \%67.8-70.5 and \%46.3-48.5 of reintegration events respectively. Consequently, longer uninterrupted runs  are therefore less represented and treated as suggestive of transient dynamics rather than definitive characterization of timescales.
+
+
+\subsection{KL Divergence} 
+Reintegration events produce measurable divergence between the stable and masked predictive distributions. When evaluating the text-masked condition (under multimodal training), the mean KL divergence at timestep $+0$ ranges from 0.20 - 0.34 nats across the five held-out sessions, indicating a moderate distributional shift when the dominant modality returns after absence. These values co-occur with approximately 30\% argmax disagreement, suggesting that one in three utterances receives a different classification (on a 6-class emotion recognition task) when audio returns. This effect decays over subsequent utterances, falling to approximately 0.12–0.18 nats at $+1$ and 0.05–0.09 nats at $+2$.  
+
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{KL_divergence.png}
+    \caption{Masking text produced noticeable divergence between prediction distributions. Conversely, masking audio produced minimal prediction divergence} 
+    \label{fig:KL_divergence} 
+\end{figure}
+
+
+By contrast, the audio-masked condition under multimodal training  shows minimal divergence: KL at $+$0 averages 0.04–0.06 nats across sessions, decaying to near-zero by $+2$. This asymmetry is roughly a 5-fold difference in $+0$ KL between masking methods, suggesting that the reintegration effect may be scaling with the informativeness of the backup modality. When text remains live during audio absence, the model maintains a more stable prediction distribution requiring little adjustment upon audio's return. When audio is the sole backup for absent text, reintegration degradation occurs, producing the larger KL divergence observed at the reintegration boundary.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{KL_divergence_barplot.png}
+    \caption{KL Divergence Barplot}
+    \label{fig:KL_divergence_barplot} 
+\end{figure}
+
+\subsection{Argmax Disagreement}
+The distributional shifts measured by KL Divergence correspond to tangible changes in model decisions (Argmax Disagreement). When masking text, stable and masked predictions disagree on the argmax class at $+0$ for 22–35\% of reintegration events (session range), falling to 14–22\% at $+1$ and 11–17\% at $+2$. This suggests instability, as approximately one in four utterances receives a different classification depending on whether text was continuously present or had just returned from absence.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{disagreement_rate.png}
+    \caption{Argmax Disagreement Curve}
+    \label{fig:disagreement_rate} 
+\end{figure}
+
+The audio-masked condition shows lower disagreement, 8–12\% at $+0$, declining to 4–8\% by $+2$. The ~3x difference in $+0$ disagreement between masking methods suggests that the belief shift observed in distribution space, translates to practical decision instability when the dominant modality is reintegrating.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{disagreement_barplot.png}
+    \caption{Argmax Disagreement Barplot}
+    \label{fig:disagreement_barplot} 
+\end{figure}
+
+
+\section{Effect of Backup Modality Consistency on Reintegration}
+
+Window $\Delta$UAR, while directionally consistent with soft metrics across sessions (Table \ref{tab:window_uar_session}), exhibits higher fold-to-fold variance reflecting the sensitivity of macro recall to class composition in small post-reintegration windows. Between-session variance in effect magnitude reflects speaker-independent deployment conditions, where different held-out sessions contain different speakers, emotion distributions, and conversational dynamics. The directional consistency of reintegration effects across text-mask > audio-mask (decay over +0/+1/+2) in all sessions, suggests the phenomenon generalizes across the expected heterogeneity of FL client populations.

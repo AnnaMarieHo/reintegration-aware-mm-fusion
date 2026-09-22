@@ -13,6 +13,16 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import recall_score, f1_score
 
 from reintegration.evaluation import EvalMetric
+from reintegration.constants import constants
+from reintegration.trainers.absence_period_eval import (
+    AbsencePeriodAccumulator,
+    log_absence_period_results,
+)
+from reintegration.trainers.reintegration_metrics import (
+    collect_recovery_window,
+    output_entropy,
+    per_class_window_metrics,
+)
 
 import logging
 
@@ -309,8 +319,10 @@ class Server(object):
         recovery_window: int = 2,
         split_label: Optional[str] = None,
         reset_scene_hidden_each_step: bool = False,
+        reset_scene_hidden_at_reintegration: bool = False,
         collect_fuse_attention: Optional[bool] = None,
         save_timestep_detail: Optional[bool] = None,
+        run_ghost_pass: Optional[bool] = None,
     ):
         """
         Per-timestep reintegration evaluation. the primary result.
@@ -323,6 +335,10 @@ class Server(object):
         Reintegration events are identified where mask[t-1]==0, mask[t]==1.
         At each event boundary and for recovery_window utterances after it,
         delta = stable_correct - masked_correct is recorded.
+
+        Absence-period metrics (modality drop 1→0 through every absent timestep until
+        0→1 return or scene end) are computed in absence_period_eval.py separately from
+        the fixed recovery_window used for reintegration.
 
         A positive mean_delta at offset 0 means the model makes more correct
         predictions when audio was continuously present than when audio just
@@ -367,6 +383,13 @@ class Server(object):
             mean_logp_gap_by_offset : dict[int, float] — mean log p_s(y*) − log p_m(y*) at each offset (nats)
             mean_kl_forward_by_offset: dict[int, float] — mean KL(P_stable || P_masked) at each offset (nats)
             mean_disagree_by_offset : dict[int, float] — mean 1[argmax_s ≠ argmax_m] at each offset
+            mean_hidden_cosine_by_offset: dict[int, float] — mean cosine sim of scene GRU hidden states
+            mean_hidden_l2_by_offset: dict[int, float] — mean L2 distance of scene GRU hidden states
+            mean_output_entropy_stable_by_offset: dict[int, float] — mean output entropy, stable pass
+            mean_output_entropy_masked_by_offset: dict[int, float] — mean output entropy, masked pass
+            mean_delta_output_entropy_by_offset: dict[int, float] — masked − stable output entropy
+            per_class_uar_by_offset: dict[int, dict[str, dict]] — per-emotion ∆UAR at each offset
+            per_class_disagree_by_offset: dict[int, dict[str, dict]] — per-emotion argmax disagreement
             logp_gap_by_offset    : dict[int, list[float]] — raw values for aggregation / bootstrap
             kl_forward_by_offset  : dict[int, list[float]]
             disagree_by_offset    : dict[int, list[float]]
@@ -375,14 +398,21 @@ class Server(object):
                                     timesteps (masked pass); None if not collected
             reset_scene_hidden_each_step : bool — echo of the flag stored for JSON
             recovery_timestep_detail: optional list[dict] — one row per (scene, event, offset)
-                timestep in the recovery window with preds, KL, etc.; None if not saved
+                timestep in the recovery window with preds, KL, hidden-state metrics, etc.;
+                hidden_stable/hidden_masked vectors included when save_timestep_detail is True
+            n_absence_events      : int — count of mask 1→0 drop transitions (full runs)
+            absence_*             : see absence_period_eval.finalize() for full-run keys
         """
         self.global_model.eval()
+        num_classes = constants.num_class_dict[self.args.dataset]
 
         if save_timestep_detail is None:
             save_timestep_detail = bool(
                 getattr(self.args, 'reint_save_timestep_detail', False)
             )
+
+        if run_ghost_pass is None:
+            run_ghost_pass = bool(getattr(self.args, 'reint_ghost_pass', False))
 
         if collect_fuse_attention is None:
             collect_fuse_attention = bool(
@@ -411,9 +441,16 @@ class Server(object):
         offset_labels = {k: [] for k in range(recovery_window + 1)}
         offset_preds_stable = {k: [] for k in range(recovery_window + 1)}
         offset_preds_masked = {k: [] for k in range(recovery_window + 1)}
+        hidden_cosine_by_offset = {k: [] for k in range(recovery_window + 1)}
+        hidden_l2_by_offset = {k: [] for k in range(recovery_window + 1)}
+        output_entropy_stable_by_offset = {k: [] for k in range(recovery_window + 1)}
+        output_entropy_masked_by_offset = {k: [] for k in range(recovery_window + 1)}
+        delta_output_entropy_by_offset = {k: [] for k in range(recovery_window + 1)}
         win_labels = []
         win_preds_stable = []
         win_preds_masked = []
+
+        absence_acc = AbsencePeriodAccumulator.create(save_timestep_detail)
 
         fuse_ent_reint = []
         fuse_ent_stable = []
@@ -434,25 +471,50 @@ class Server(object):
             scene_mask   = scene_mask.to(self.device)
             T = scene_labels.shape[0]
 
+            # True only at modality reintegration timesteps: 0 -> 1
+            reint_reset_positions = torch.zeros(
+                T,
+                dtype=torch.bool,
+                device=self.device,
+            )
+
+            if reset_scene_hidden_at_reintegration:
+                reint_reset_positions[1:] = (
+                    (scene_mask[:-1] == 0) &
+                    (scene_mask[1:] == 1)
+                )
+                reset_idx = torch.where(reint_reset_positions)[0]
+
+                if reset_idx.numel() > 0:
+                    logging.info(
+                        "[reset_at_return] scene=%d reset positions=%s",
+                        scene_batch_idx,
+                        reset_idx.detach().cpu().tolist(),
+                    )                    
+            else:
+                reint_reset_positions = None
+
             # Stable pass — model in its trained condition
             ones_mask = torch.ones(T, device=self.device, dtype=torch.long)
             with torch.no_grad():
                 if _collect:
-                    preds_stable, _, stable_fuse_att_m, stable_a_len_used = self.global_model(
+                    preds_stable, scene_hidden_stable, stable_fuse_att_m, stable_a_len_used = self.global_model(
                         scene_x_a, scene_x_b,
                         scene_len_a, scene_len_b,
                         ones_mask,
                         self.device,
-                        reset_scene_hidden_each_step=reset_scene_hidden_each_step,
+                        reset_scene_hidden_each_step=False,
+                        reset_scene_hidden_at_positions=None,
                         return_fuse_attention=True,
                     )
                 else:
-                    preds_stable, _ = self.global_model(
+                    preds_stable, scene_hidden_stable = self.global_model(
                         scene_x_a, scene_x_b,
                         scene_len_a, scene_len_b,
                         ones_mask,
                         self.device,
-                        reset_scene_hidden_each_step=reset_scene_hidden_each_step,
+                        reset_scene_hidden_each_step=False,
+                        reset_scene_hidden_at_positions=None,
                         return_fuse_attention=False,
                     )
                     stable_fuse_att_m = None
@@ -461,25 +523,44 @@ class Server(object):
             # Masked pass — Markov availability
             with torch.no_grad():
                 if _collect:
-                    preds_masked, _, masked_fuse_att_m, masked_a_len_used = self.global_model(
+                    preds_masked, scene_hidden_masked, masked_fuse_att_m, masked_a_len_used = self.global_model(
                         scene_x_a, scene_x_b,
                         scene_len_a, scene_len_b,
                         scene_mask,
                         self.device,
                         reset_scene_hidden_each_step=reset_scene_hidden_each_step,
+                        reset_scene_hidden_at_positions=reint_reset_positions,
                         return_fuse_attention=True,
                     )
                 else:
-                    preds_masked, _ = self.global_model(
+                    preds_masked, scene_hidden_masked = self.global_model(
+                        scene_x_a, scene_x_b,
+                        scene_len_a, scene_len_b,
+                        scene_mask,
+                        self.device,
+                        reset_scene_hidden_each_step=reset_scene_hidden_each_step,
+                        reset_scene_hidden_at_positions=reint_reset_positions,
+                        return_fuse_attention=False,
+
+                    )
+                    masked_fuse_att_m = None
+                    masked_a_len_used = None
+
+            scene_hidden_ghost = None
+            if run_ghost_pass:
+                with torch.no_grad():
+                    _, scene_hidden_ghost = self.global_model(
                         scene_x_a, scene_x_b,
                         scene_len_a, scene_len_b,
                         scene_mask,
                         self.device,
                         reset_scene_hidden_each_step=reset_scene_hidden_each_step,
                         return_fuse_attention=False,
+                        encoding_mode="ghost",
                     )
-                    masked_fuse_att_m = None
-                    masked_a_len_used = None
+
+            out_ent_stable = output_entropy(preds_stable).detach()
+            out_ent_masked = output_entropy(preds_masked).detach()
 
             pred_s    = preds_stable.argmax(dim=-1)   # (T,)
             pred_m    = preds_masked.argmax(dim=-1)   # (T,)
@@ -584,59 +665,70 @@ class Server(object):
             for t in range(1, T):
                 if mask_np[t - 1] == 0 and mask_np[t] == 1:
                     n_reint_events += 1
-                    for k in range(recovery_window + 1):
-                        t_k = t + k
-                        if t_k >= T:
-                            break
-                        if k > 0 and mask_np[t_k] == 0:
-                            break   # another absence run stop this event's window
-                        correct_s = int(pred_s_np[t_k] == labels_np[t_k])
-                        correct_m = int(pred_m_np[t_k] == labels_np[t_k])
-                        delta_by_offset[k].append(correct_s - correct_m)
+                    # reintegration at t: walk backward through the preceding absence run
+                    t_prev = t - 1
+                    run_length = 0
 
-                        # Log Probability: log(P_stable(y*)) - log(P_masked(y*))
-                        y_idx = int(labels_np[t_k])
-                        logp_gap = float(log_p_s[t_k, y_idx] - log_p_m[t_k, y_idx])
-                        logp_gap_by_offset[k].append(logp_gap)
-    
-                        # KL(P_stable || P_masked) in nats; same support as softmax rows
-                        p_row = np.exp(log_p_s[t_k])
-                        kl_f = float(np.sum(p_row * (log_p_s[t_k] - log_p_m[t_k])))
-                        kl_forward_by_offset[k].append(kl_f)
+                    while t_prev >= 0 and mask_np[t_prev] == 0:
+                        run_length += 1
+                        t_prev -= 1
 
-                        #P_stable(y*) != P_masked(y*)
-                        disagree_by_offset[k].append(
-                            float(pred_s_np[t_k] != pred_m_np[t_k])
-                        )
-                        offset_labels[k].append(int(labels_np[t_k]))
-                        offset_preds_stable[k].append(int(pred_s_np[t_k]))
-                        offset_preds_masked[k].append(int(pred_m_np[t_k]))
+                    collect_recovery_window(
+                        t_event=t,
+                        T=T,
+                        mask_np=mask_np,
+                        window=recovery_window,
+                        stop_when_mask_value=0,
+                        pred_s_np=pred_s_np,
+                        pred_m_np=pred_m_np,
+                        labels_np=labels_np,
+                        log_p_s=log_p_s,
+                        log_p_m=log_p_m,
+                        scene_hidden_stable=scene_hidden_stable,
+                        scene_hidden_masked=scene_hidden_masked,
+                        out_ent_stable=out_ent_stable,
+                        out_ent_masked=out_ent_masked,
+                        delta_by_offset=delta_by_offset,
+                        logp_gap_by_offset=logp_gap_by_offset,
+                        kl_forward_by_offset=kl_forward_by_offset,
+                        disagree_by_offset=disagree_by_offset,
+                        offset_labels=offset_labels,
+                        offset_preds_stable=offset_preds_stable,
+                        offset_preds_masked=offset_preds_masked,
+                        hidden_cosine_by_offset=hidden_cosine_by_offset,
+                        hidden_l2_by_offset=hidden_l2_by_offset,
+                        output_entropy_stable_by_offset=output_entropy_stable_by_offset,
+                        output_entropy_masked_by_offset=output_entropy_masked_by_offset,
+                        delta_output_entropy_by_offset=delta_output_entropy_by_offset,
+                        timestep_detail=recovery_timestep_detail,
+                        t_event_key='t_reint',
+                        scene_batch_idx=scene_batch_idx,
+                        save_timestep_detail=save_timestep_detail,
+                        seen_window_t=seen_window_t,
+                        win_labels=win_labels,
+                        win_preds_stable=win_preds_stable,
+                        win_preds_masked=win_preds_masked,
+                        extra={
+                            "preceding_run_length": int(run_length)
+                        },
+                    )
 
-                        if recovery_timestep_detail is not None:
-                            recovery_timestep_detail.append({
-                                'scene_batch_idx': int(scene_batch_idx),
-                                't_reint': int(t),
-                                'offset_k': int(k),
-                                't_abs': int(t_k),
-                                'y_true': int(labels_np[t_k]),
-                                'pred_stable': int(pred_s_np[t_k]),
-                                'pred_masked': int(pred_m_np[t_k]),
-                                'correct_stable': int(correct_s),
-                                'correct_masked': int(correct_m),
-                                'delta_correct': int(correct_s - correct_m),
-                                'logp_gap': float(logp_gap),
-                                'kl_forward': float(kl_f),
-                                'disagree': float(
-                                    pred_s_np[t_k] != pred_m_np[t_k]
-                                ),
-                                'mask_t': int(mask_np[t_k]),
-                            })
-
-                        if t_k not in seen_window_t:
-                            seen_window_t.add(t_k)
-                            win_labels.append(int(labels_np[t_k]))
-                            win_preds_stable.append(int(pred_s_np[t_k]))
-                            win_preds_masked.append(int(pred_m_np[t_k]))
+            absence_acc.collect_scene(
+                scene_batch_idx=scene_batch_idx,
+                T=T,
+                mask_np=mask_np,
+                pred_s_np=pred_s_np,
+                pred_m_np=pred_m_np,
+                labels_np=labels_np,
+                log_p_s=log_p_s,
+                log_p_m=log_p_m,
+                scene_hidden_stable=scene_hidden_stable,
+                scene_hidden_masked=scene_hidden_masked,
+                out_ent_stable=out_ent_stable,
+                out_ent_masked=out_ent_masked,
+                save_hidden_vectors=save_timestep_detail,
+                scene_hidden_ghost=scene_hidden_ghost,
+            )
         uar_stable = recall_score(
             all_labels, all_preds_stable, average='macro', zero_division=0
         ) * 100
@@ -656,6 +748,8 @@ class Server(object):
             uar_stable_window = None
             uar_masked_window = None
             delta_uar_window = None
+
+        absence_results = absence_acc.finalize(num_classes)
 
         def _mean_list(d):
             return {
@@ -692,6 +786,38 @@ class Server(object):
                     'delta_uar': float('nan'),
                 }
 
+        mean_hidden_cosine_by_offset = _mean_list(hidden_cosine_by_offset)
+        mean_hidden_l2_by_offset = _mean_list(hidden_l2_by_offset)
+        mean_output_entropy_stable_by_offset = _mean_list(output_entropy_stable_by_offset)
+        mean_output_entropy_masked_by_offset = _mean_list(output_entropy_masked_by_offset)
+        mean_delta_output_entropy_by_offset = _mean_list(delta_output_entropy_by_offset)
+
+        per_class_uar_by_offset = {}
+        per_class_disagree_by_offset = {}
+        for k in range(recovery_window + 1):
+            class_metrics = per_class_window_metrics(
+                offset_labels[k],
+                offset_preds_stable[k],
+                offset_preds_masked[k],
+                num_classes,
+            )
+            per_class_uar_by_offset[k] = {
+                cls: {
+                    'n': m['n'],
+                    'uar_stable': m['uar_stable'],
+                    'uar_masked': m['uar_masked'],
+                    'delta_uar': m['delta_uar'],
+                }
+                for cls, m in class_metrics.items()
+            }
+            per_class_disagree_by_offset[k] = {
+                cls: {
+                    'n': m['n'],
+                    'disagree_rate': m['disagree_rate'],
+                }
+                for cls, m in class_metrics.items()
+            }
+
         curve_str = ', '.join(
             f'+{k}:{mean_delta_by_offset[k]:.4f} (n={len(delta_by_offset[k])})'
             for k in range(recovery_window + 1)
@@ -706,6 +832,20 @@ class Server(object):
         )
         dis_str = ', '.join(
             f'+{k}:{mean_disagree_by_offset[k]:.4f}'
+            for k in range(recovery_window + 1)
+        )
+        hidden_cos_str = ', '.join(
+            f'+{k}:{mean_hidden_cosine_by_offset[k]:.4f}'
+            for k in range(recovery_window + 1)
+        )
+        hidden_l2_str = ', '.join(
+            f'+{k}:{mean_hidden_l2_by_offset[k]:.4f}'
+            for k in range(recovery_window + 1)
+        )
+        out_ent_str = ', '.join(
+            f'+{k}:stable={mean_output_entropy_stable_by_offset[k]:.4f},'
+            f'masked={mean_output_entropy_masked_by_offset[k]:.4f},'
+            f'delta={mean_delta_output_entropy_by_offset[k]:.4f}'
             for k in range(recovery_window + 1)
         )
         uar_offset_str = ', '.join(
@@ -738,6 +878,17 @@ class Server(object):
         logging.info(f'{lp}Log-prob gap on true class (nats): {logp_str}')
         logging.info(f'{lp}KL(P_stable || P_masked) (nats): {kl_str}')
         logging.info(f'{lp}Argmax disagreement rate: {dis_str}')
+        logging.info(f'{lp}Scene GRU hidden cosine sim (stable vs masked): {hidden_cos_str}')
+        logging.info(f'{lp}Scene GRU hidden L2 distance (stable vs masked): {hidden_l2_str}')
+        logging.info(f'{lp}Output entropy trajectory (nats): {out_ent_str}')
+
+        log_absence_period_results(
+            absence_results,
+            split_label=split_label,
+            reset_scene_hidden_each_step=reset_scene_hidden_each_step,
+            reset_scene_hidden_at_reintegration=reset_scene_hidden_at_reintegration,
+            save_timestep_detail=save_timestep_detail,
+        )
 
         if save_timestep_detail:
             n_rec = len(recovery_timestep_detail) if recovery_timestep_detail else 0
@@ -792,12 +943,26 @@ class Server(object):
             'mean_logp_gap_by_offset': mean_logp_gap_by_offset,
             'mean_kl_forward_by_offset': mean_kl_forward_by_offset,
             'mean_disagree_by_offset': mean_disagree_by_offset,
+            'mean_hidden_cosine_by_offset': mean_hidden_cosine_by_offset,
+            'mean_hidden_l2_by_offset': mean_hidden_l2_by_offset,
+            'mean_output_entropy_stable_by_offset': mean_output_entropy_stable_by_offset,
+            'mean_output_entropy_masked_by_offset': mean_output_entropy_masked_by_offset,
+            'mean_delta_output_entropy_by_offset': mean_delta_output_entropy_by_offset,
+            'per_class_uar_by_offset': per_class_uar_by_offset,
+            'per_class_disagree_by_offset': per_class_disagree_by_offset,
             'logp_gap_by_offset':   {k: v for k, v in logp_gap_by_offset.items()},
             'kl_forward_by_offset': {k: v for k, v in kl_forward_by_offset.items()},
             'disagree_by_offset':   {k: v for k, v in disagree_by_offset.items()},
+            'hidden_cosine_by_offset': {k: v for k, v in hidden_cosine_by_offset.items()},
+            'hidden_l2_by_offset': {k: v for k, v in hidden_l2_by_offset.items()},
+            'output_entropy_stable_by_offset': {k: v for k, v in output_entropy_stable_by_offset.items()},
+            'output_entropy_masked_by_offset': {k: v for k, v in output_entropy_masked_by_offset.items()},
+            'delta_output_entropy_by_offset': {k: v for k, v in delta_output_entropy_by_offset.items()},
             'reset_scene_hidden_each_step': reset_scene_hidden_each_step,
+            'reset_scene_hidden_at_reintegration': reset_scene_hidden_at_reintegration,
             'fuse_attention':       fuse_attention_summary,
             'recovery_timestep_detail': recovery_timestep_detail,
+            **absence_results,
         }
 
     # Remaining methods unchanged 

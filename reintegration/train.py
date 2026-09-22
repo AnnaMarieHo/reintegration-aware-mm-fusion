@@ -36,6 +36,7 @@ python -m reintegration.train \
 import torch
 import json
 import random
+import re
 import numpy as np
 import torch.nn as nn
 import argparse, logging
@@ -76,6 +77,27 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+
+def fold_indices_for_run(args):
+    """
+    Training always uses folds 1..5. Eval-only runs a single fold when
+    --eval_fold is set or --ckpt_path contains .../fold{N}/... (typical layout).
+    """
+    if not getattr(args, 'eval_only', False):
+        return list(range(1, 6))
+    if getattr(args, 'eval_fold', None) is not None:
+        return [int(args.eval_fold)]
+    ckpt = getattr(args, 'ckpt_path', None)
+    if ckpt:
+        m = re.search(r'fold(\d+)', str(ckpt), re.IGNORECASE)
+        if m:
+            return [int(m.group(1))]
+    logging.warning(
+        "Eval-only: could not infer fold from --ckpt_path; running all folds 1..5 "
+        "(each loads the same checkpoint — prefer paths like .../fold3/model.pt)."
+    )
+    return list(range(1, 6))
 
 
 def parse_args():
@@ -296,6 +318,16 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--reint_reset_at_return",
+        action="store_true",
+        help=(
+            "Run an additional reintegration-boundary ablation. "
+            "Scene-GRU state evolves normally during absence, then is reset "
+            "immediately before each 0->1 modality-return timestep."
+        ),
+    )
+
+    parser.add_argument(
         '--label_nosiy_level', 
         type=float, 
         default=0.1,
@@ -341,6 +373,16 @@ def parse_args():
         "--eval_only",
         action="store_true",
         help="Skip training; load checkpoint and run reintegration eval only (use with --ckpt_path).",
+    )
+    parser.add_argument(
+        "--eval_fold",
+        type=int,
+        default=None,
+        choices=(1, 2, 3, 4, 5),
+        help=(
+            "Eval-only: run this fold only (default: parse fold N from --ckpt_path "
+            "when it contains .../foldN/...)."
+        ),
     )
     parser.add_argument(
         "--mask_modality",
@@ -406,6 +448,15 @@ def parse_args():
             "scene_batch_idx and t_abs."
         ),
     )
+    parser.add_argument(
+        "--reint_ghost_pass",
+        action="store_true",
+        help=(
+            "During reintegration eval, run a third ghost forward pass (null absent "
+            "modality after its RNN, before fusion) and record stable-vs-ghost and "
+            "masked-vs-ghost hidden cosine metrics over absence periods."
+        ),
+    )
     #------------------------------------------------------------------------------------------------
     args = parser.parse_args()
     return args
@@ -419,6 +470,9 @@ if __name__ == '__main__':
             "Client schedule seed is set (%s): per-round FL subsamples match other runs using the same seed.",
             args.client_schedule_seed,
         )
+    fold_list = fold_indices_for_run(args)
+    if args.eval_only:
+        logging.info("Eval-only: will run fold(s) %s", fold_list)
 
     # data manager
     dm = DataloadManager(args)
@@ -491,7 +545,7 @@ if __name__ == '__main__':
                 apply_mask      = apply_mask,
             )
         
-    for fold_idx in range(1, 6):
+    for fold_idx in fold_list:
         # number of clients
         client_ids = [client_id for client_id in dm.client_ids if client_id not in ['dev', 'test']]
         num_of_clients = len(client_ids)
@@ -713,10 +767,11 @@ if __name__ == '__main__':
 
                 with torch.no_grad():
                     reint_dev = server.run_reintegration_eval(
-                        dataloader_dict['dev'], split_label='dev'
+                        dataloader_dict['dev'], split_label='dev', recovery_window=4
                     )
                     reint_test = server.run_reintegration_eval(
-                        dataloader_dict['test'], split_label='test'
+                        # dataloader_dict['test'], split_label='test'
+                        dataloader_dict['test'], split_label='test', recovery_window=4
                     )
                     # reint_test_all_zeros = server.run_reintegration_eval(
                     #     dataloader_dict['test_all_zeros_audio'],
@@ -735,6 +790,25 @@ if __name__ == '__main__':
                     # 'test_all_zeros_audio': reint_test_all_zeros,
                 }
 
+                if getattr(args, "reint_reset_at_return", False):
+                    with torch.no_grad():
+                        reint_test_return_reset = server.run_reintegration_eval(
+                            dataloader_dict["test"],
+                            split_label="test",
+                            recovery_window=4,
+                            reset_scene_hidden_each_step=False,
+                            reset_scene_hidden_at_reintegration=True,
+                        )
+
+                    save_result_dict[f"fold{fold_idx}"][
+                        "reintegration_test_reset_at_return"
+                    ] = reint_test_return_reset
+
+                    reint_splits[
+                        "test_reset_at_return"
+                    ] = reint_test_return_reset
+                    
+
                 if getattr(args, 'reint_reset_scene_hidden', False):
                     with torch.no_grad():
                         reint_dev_reset = server.run_reintegration_eval(
@@ -745,6 +819,7 @@ if __name__ == '__main__':
                         reint_test_reset = server.run_reintegration_eval(
                             dataloader_dict['test'],
                             split_label='test',
+                            recovery_window=4,
                             reset_scene_hidden_each_step=True,
                         )
                         # reint_test_all_zeros_reset = server.run_reintegration_eval(

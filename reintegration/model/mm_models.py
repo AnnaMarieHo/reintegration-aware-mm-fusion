@@ -132,6 +132,7 @@ class SERClassifier(nn.Module):
         mask_a=None,
         mask_b=None,
         return_fuse_attention: bool = False,
+        encoding_mode: str = "standard",
     ):
         """
         Utterance-level forward pass.
@@ -139,8 +140,14 @@ class SERClassifier(nn.Module):
         If return_fuse_attention and fuse_base fusion is active, returns
         (preds, x_mm, fuse_att, a_len) where fuse_att is post-softmax weights (B, d_head, seq_len)
         and a_len splits audio vs. text positions in the fused sequence.
+
+        encoding_mode:
+            "standard" — zero absent modality before its RNN (text) or after Conv1d (audio).
+            "ghost"    — run encoders on full features, then zero the absent modality branch
+                         after its RNN and before fusion (true null at the attention layer).
         """
         fuse_att_out = None
+        ghost = encoding_mode == "ghost"
         x_audio = self.audio_conv(x_audio)
 
         len_a = len_a // 8
@@ -153,7 +160,8 @@ class SERClassifier(nn.Module):
             time = torch.arange(a_max_len, device=x_audio.device).unsqueeze(0)
             valid_len = time < len_a.unsqueeze(1)
             mask_a_reduced = mask_a_reduced & valid_len
-            x_audio = x_audio * mask_a_reduced.unsqueeze(-1).float()
+            if not ghost:
+                x_audio = x_audio * mask_a_reduced.unsqueeze(-1).float()
 
         # Text-level availability mask (symmetric to audio masking above).
         # mask_b[t]==False → zero out all tokens for utterance t before the RNN.
@@ -166,7 +174,8 @@ class SERClassifier(nn.Module):
             len_t_clamped[len_t_clamped == 0] = 1
             valid_len_b = time_b < len_t_clamped.unsqueeze(1)
             mask_b_reduced = mask_b_reduced & valid_len_b
-            x_text = x_text * mask_b_reduced.unsqueeze(-1).float()
+            if not ghost:
+                x_text = x_text * mask_b_reduced.unsqueeze(-1).float()
 
         if len_a[0] != 0:
             x_audio = pack_padded_sequence(
@@ -186,6 +195,14 @@ class SERClassifier(nn.Module):
             x_audio, _ = pad_packed_sequence(x_audio, batch_first=True)
         if len_t[0] != 0:
             x_text,  _ = pad_packed_sequence(x_text,  batch_first=True)
+
+        if ghost:
+            if mask_a is not None:
+                utt_present_a = mask_a.any(dim=1)
+                x_audio = x_audio * utt_present_a.float().view(-1, 1, 1)
+            if mask_b is not None:
+                utt_present_b = mask_b.any(dim=1)
+                x_text = x_text * utt_present_b.float().view(-1, 1, 1)
 
         if self.en_att:
             if self.att_name == 'multihead':
@@ -333,6 +350,7 @@ class SceneGRUWrapper(nn.Module):
         mask_scene,  # (T,) int tensor — 1=modality present, 0=modality absent
         device,
         return_fuse_attention: bool = False,
+        encoding_mode: str = "standard",
     ):
         """
         Run SERClassifier on all T utterances in a single batched forward pass.
@@ -384,7 +402,7 @@ class SceneGRUWrapper(nn.Module):
                     fb_len = x_b_scene[t].shape[1]
                     mask_b[t, :fb_len] = True
 
-        enc_kw = dict(mask_a=mask_a, mask_b=mask_b)
+        enc_kw = dict(mask_a=mask_a, mask_b=mask_b, encoding_mode=encoding_mode)
         fuse_att_batch = None
         a_len_fuse = None
         if return_fuse_attention:
@@ -427,7 +445,9 @@ class SceneGRUWrapper(nn.Module):
         mask_scene,
         device,
         reset_scene_hidden_each_step: bool = False,
+        reset_scene_hidden_at_positions=None,
         return_fuse_attention: bool = False,
+        encoding_mode: str = "standard",
     ):
         """
         Full scene forward pass.
@@ -445,11 +465,15 @@ class SceneGRUWrapper(nn.Module):
             x_a_scene, x_b_scene, len_a_scene, len_b_scene,
             mask_scene, device,
             return_fuse_attention=return_fuse_attention,
+            encoding_mode=encoding_mode,
         )
+
+
         embeddings = self.dropout(embeddings)
 
+        B, T, _ = embeddings.shape
+
         if reset_scene_hidden_each_step:
-            B, T, _ = embeddings.shape
             h0 = torch.zeros(
                 self.scene_gru.num_layers,
                 B,
@@ -457,15 +481,82 @@ class SceneGRUWrapper(nn.Module):
                 device=embeddings.device,
                 dtype=embeddings.dtype,
             )
+
             outs = []
+
             for t in range(T):
-                o, _ = self.scene_gru(embeddings[:, t : t + 1, :], h0)
+                o, _ = self.scene_gru(
+                    embeddings[:, t:t + 1, :],
+                    h0,
+                )
                 outs.append(o[:, 0, :])
+
             scene_out = torch.stack(outs, dim=0).squeeze(1)
+
+        elif reset_scene_hidden_at_positions is not None:
+            h = torch.zeros(
+                self.scene_gru.num_layers,
+                B,
+                self.d_hid,
+                device=embeddings.device,
+                dtype=embeddings.dtype,
+            )
+
+            reset_positions = torch.as_tensor(
+                reset_scene_hidden_at_positions,
+                device=embeddings.device,
+                dtype=torch.bool,
+            )
+
+            if reset_positions.numel() != T:
+                raise ValueError(
+                    f"reset_scene_hidden_at_positions has length "
+                    f"{reset_positions.numel()}, expected {T}"
+                )
+
+            outs = []
+
+            for t in range(T):
+
+                # Reset BEFORE processing the reintegration utterance
+                if reset_positions[t]:
+                    h = torch.zeros_like(h)
+
+                o, h = self.scene_gru(
+                    embeddings[:, t:t + 1, :],
+                    h,
+                )
+
+                outs.append(o[:, 0, :])
+
+            scene_out = torch.stack(outs, dim=0).squeeze(1)
+
         else:
-            scene_out, _ = self.scene_gru(embeddings)   # (1, T, d_hid)
-            scene_out = scene_out.squeeze(0)             # (T, d_hid)
-        preds = self.scene_classifier(scene_out)  # (T, num_classes)
+            # Normal stateful scene GRU
+            scene_out, _ = self.scene_gru(embeddings)
+            scene_out = scene_out.squeeze(0)
+
+        preds = self.scene_classifier(scene_out)
+        # embeddings = self.dropout(embeddings)
+
+        # if reset_scene_hidden_each_step:
+        #     B, T, _ = embeddings.shape
+        #     h0 = torch.zeros(
+        #         self.scene_gru.num_layers,
+        #         B,
+        #         self.d_hid,
+        #         device=embeddings.device,
+        #         dtype=embeddings.dtype,
+        #     )
+        #     outs = []
+        #     for t in range(T):
+        #         o, _ = self.scene_gru(embeddings[:, t : t + 1, :], h0)
+        #         outs.append(o[:, 0, :])
+        #     scene_out = torch.stack(outs, dim=0).squeeze(1)
+        # else:
+        #     scene_out, _ = self.scene_gru(embeddings)   # (1, T, d_hid)
+        #     scene_out = scene_out.squeeze(0)             # (T, d_hid)
+        # preds = self.scene_classifier(scene_out)  # (T, num_classes)
 
         if return_fuse_attention:
             return preds, scene_out, fuse_att_batch, a_len_fuse

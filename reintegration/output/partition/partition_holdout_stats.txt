@@ -1,0 +1,88 @@
+Partition written: /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_1/partition/iemocap/partition.json
+  Holdout session : 1  (speakers: Ses01F, Ses01M)
+  Train clients   : 8 speakers — Ses02F, Ses02M, Ses03F, Ses03M, Ses04F, Ses04M, Ses05F, Ses05M
+  Train scenes    : 529  (6867 utterances)
+  Dev scenes      : 83  (1163 utterances, 13 interactions)
+  Test scenes     : 127  (1764 utterances)
+
+    Ses02F: 50 scenes, 651 utterances
+    Ses02M: 59 scenes, 746 utterances
+    Ses03F: 75 scenes, 984 utterances
+    Ses03M: 78 scenes, 1025 utterances
+    Ses04F: 58 scenes, 728 utterances
+    Ses04M: 63 scenes, 828 utterances
+    Ses05F: 70 scenes, 905 utterances
+    Ses05M: 76 scenes, 1000 utterances
+
+
+
+Partition written: /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_2/partition/iemocap/partition.json
+  Holdout session : 2  (speakers: Ses02F, Ses02M)
+  Train clients   : 8 speakers — Ses01F, Ses01M, Ses03F, Ses03M, Ses04F, Ses04M, Ses05F, Ses05M
+  Train scenes    : 531  (6896 utterances)
+  Dev scenes      : 80  (1127 utterances, 13 interactions)
+  Test scenes     : 128  (1771 utterances)
+
+    Ses01F: 50 scenes, 631 utterances
+    Ses01M: 53 scenes, 680 utterances
+    Ses03F: 76 scenes, 993 utterances
+    Ses03M: 78 scenes, 1025 utterances
+    Ses04F: 62 scenes, 782 utterances
+    Ses04M: 66 scenes, 880 utterances
+    Ses05F: 70 scenes, 905 utterances
+    Ses05M: 76 scenes, 1000 utterances
+
+
+
+Partition written: /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_3/partition/iemocap/partition.json
+  Holdout session : 3  (speakers: Ses03F, Ses03M)
+  Train clients   : 8 speakers — Ses01F, Ses01M, Ses02F, Ses02M, Ses04F, Ses04M, Ses05F, Ses05M
+  Train scenes    : 500  (6461 utterances)
+  Dev scenes      : 88  (1244 utterances, 12 interactions)
+  Test scenes     : 150  (2089 utterances)
+
+    Ses01F: 55 scenes, 700 utterances
+    Ses01M: 59 scenes, 770 utterances
+    Ses02F: 62 scenes, 820 utterances
+    Ses02M: 72 scenes, 910 utterances
+    Ses04F: 59 scenes, 751 utterances
+    Ses04M: 65 scenes, 862 utterances
+    Ses05F: 63 scenes, 796 utterances
+    Ses05M: 65 scenes, 852 utterances
+
+
+
+Partition written: /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/output/partition/holdout_ses_4/partition/iemocap/partition.json
+  Holdout session : 4  (speakers: Ses04F, Ses04M)
+  Train clients   : 8 speakers — Ses01F, Ses01M, Ses02F, Ses02M, Ses03F, Ses03M, Ses05F, Ses05M
+  Train scenes    : 505  (6547 utterances)
+  Dev scenes      : 85  (1195 utterances, 13 interactions)
+  Test scenes     : 144  (2052 utterances)
+
+    Ses01F: 50 scenes, 631 utterances
+    Ses01M: 53 scenes, 680 utterances
+    Ses02F: 62 scenes, 820 utterances
+    Ses02M: 72 scenes, 910 utterances
+    Ses03F: 62 scenes, 800 utterances
+    Ses03M: 60 scenes, 801 utterances
+    Ses05F: 70 scenes, 905 utterances
+    Ses05M: 76 scenes, 1000 utterances
+
+
+
+Partition written: /mnt/c/Users/aymie/Documents/UK_projects/masters-proj/my_extensions/reintegration/ou/partition/iemocap/partition.json
+  Holdout session : 5  (speakers: Ses05F, Ses05M)
+  Train clients   : 8 speakers — Ses01F, Ses01M, Ses02F, Ses02M, Ses03F, Ses03M, Ses04F, Ses04M
+  Train scenes    : 502  (6510 utterances)
+  Dev scenes      : 82  (1166 utterances, 13 interactions)
+  Test scenes     : 153  (2118 utterances)
+
+    Ses01F: 50 scenes, 631 utterances
+    Ses01M: 53 scenes, 680 utterances
+    Ses02F: 62 scenes, 820 utterances
+    Ses02M: 72 scenes, 910 utterances
+    Ses03F: 62 scenes, 800 utterances
+    Ses03M: 60 scenes, 801 utterances
+    Ses04F: 68 scenes, 872 utterances
+    Ses04M: 75 scenes, 996 utterances
+
